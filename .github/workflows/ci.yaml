@@ -22,7 +22,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
       - uses: actions/cache@v5.0.5
@@ -39,7 +39,7 @@ jobs:
   feature-sanity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
       - uses: actions/cache@v5.0.5
@@ -82,7 +82,7 @@ jobs:
               --no-default-features
               --features blocking,native-tls,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
       - uses: actions/cache@v5.0.5
@@ -126,7 +126,7 @@ jobs:
               --no-default-features
               --features blocking,native-tls,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
       - uses: actions/cache@v5.0.5
@@ -154,7 +154,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: minioadmin
       MINIO_IMAGE: quay.io/minio/minio:latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
       - uses: actions/cache@v5.0.5
@@ -213,7 +213,7 @@ jobs:
       AWS_ACCESS_KEY_ID: s3rsrustfsadmin
       AWS_SECRET_ACCESS_KEY: s3rsrustfsadminsecret
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
       - uses: actions/cache@v5.0.5
