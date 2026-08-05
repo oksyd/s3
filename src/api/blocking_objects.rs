@@ -1450,6 +1450,13 @@ impl Iterator for BlockingListObjectsV2Pager {
     }
 }
 
+impl BlockingListObjectsV2Pager {
+    /// Returns the maximum number of keys in a page, as set by [`BlockingListObjectsV2Request::max_keys`]
+    pub fn max_keys() -> Option<u32> {
+        self.max_keys
+    }
+}
+
 /// Request builder for presigned requests with a custom method.
 pub struct BlockingPresignObjectRequest {
     client: BlockingClient,

@@ -1483,6 +1483,11 @@ impl ListObjectsV2Pager {
 
         Ok(Some(page))
     }
+
+    /// Returns the maximum number of keys in a page, as set by [`ListObjectsV2Request::max_keys`]
+    pub fn max_keys() -> Option<u32> {
+        self.max_keys
+    }
 }
 
 /// Request builder for presigned requests with a custom method.
