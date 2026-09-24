@@ -1484,8 +1484,11 @@ impl ListObjectsV2Pager {
         Ok(Some(page))
     }
 
-    /// Returns the maximum number of keys in a page, as set by [`ListObjectsV2Request::max_keys`]
-    pub fn max_keys() -> Option<u32> {
+    /// Returns the configured maximum number of keys per request.
+    ///
+    /// Returns `None` if [`ListObjectsV2Request::max_keys`] was not set. This limit
+    /// does not indicate how many pages remain.
+    pub fn max_keys(&self) -> Option<u32> {
         self.max_keys
     }
 }
