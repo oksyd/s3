@@ -20,35 +20,35 @@ permissions:
 
 jobs:
   fmt:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
-      - uses: actions/cache@v5.0.5
+      - uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.toml') }}
           restore-keys: |
             cargo-${{ runner.os }}-
       - run: cargo fmt --check
 
   feature-sanity:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
-      - uses: actions/cache@v5.0.5
+      - uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.toml') }}
           restore-keys: |
             cargo-${{ runner.os }}-
       - run: cargo check --lib --no-default-features
@@ -56,7 +56,7 @@ jobs:
       - run: cargo test --lib --no-default-features --features providers
 
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -82,16 +82,16 @@ jobs:
               --no-default-features
               --features blocking,native-tls,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
-      - uses: actions/cache@v5.0.5
+      - uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.toml') }}
           restore-keys: |
             cargo-${{ runner.os }}-
       - name: Install OpenSSL (native-tls)
@@ -100,7 +100,7 @@ jobs:
       - run: cargo clippy --all-targets ${{ matrix.args }} -- -D warnings
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -126,16 +126,16 @@ jobs:
               --no-default-features
               --features blocking,native-tls,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
-      - uses: actions/cache@v5.0.5
+      - uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.toml') }}
           restore-keys: |
             cargo-${{ runner.os }}-
       - name: Install OpenSSL (native-tls)
@@ -144,7 +144,7 @@ jobs:
       - run: cargo test ${{ matrix.args }}
 
   minio-integration:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       S3_TEST_BACKEND: minio
       S3_TEST_STRICT: "1"
@@ -154,16 +154,16 @@ jobs:
       AWS_SECRET_ACCESS_KEY: minioadmin
       MINIO_IMAGE: quay.io/minio/minio:latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
-      - uses: actions/cache@v5.0.5
+      - uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.toml') }}
           restore-keys: |
             cargo-${{ runner.os }}-
       - name: Install OpenSSL (native-tls)
@@ -204,7 +204,7 @@ jobs:
         run: docker rm -f minio || true
 
   rustfs-integration:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       S3_TEST_BACKEND: rustfs
       S3_TEST_STRICT: "0"
@@ -213,16 +213,16 @@ jobs:
       AWS_ACCESS_KEY_ID: s3rsrustfsadmin
       AWS_SECRET_ACCESS_KEY: s3rsrustfsadminsecret
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
-      - uses: actions/cache@v5.0.5
+      - uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.toml') }}
           restore-keys: |
             cargo-${{ runner.os }}-
       - name: Install OpenSSL (native-tls)
