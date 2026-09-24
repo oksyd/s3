@@ -1,8 +1,17 @@
+## [0.1.37] - 2026-09-24
+
+### 🐛 Bug Fixes
+
+- Make ListObjectsV2 pager max_keys getters callable
 ## [0.1.36] - 2026-06-08
 
 ### 🐛 Bug Fixes
 
 - Ci
+
+### ⚙️ Miscellaneous Tasks
+
+- Release s3 version 0.1.36
 ## [0.1.35] - 2026-06-08
 
 ### 🚀 Features
@@ -127,14 +136,14 @@
 - Release s3 version 0.1.23
 ## [0.1.22] - 2026-03-10
 
+### 📚 Documentation
+
+- Improve docs.rs experience and enforce doc quality
+
 ### 🚜 Refactor
 
 - Unify transport flow and tighten feature gates
 - Reorganize auth and types
-
-### 📚 Documentation
-
-- Improve docs.rs experience and enforce doc quality
 
 ### ⚙️ Miscellaneous Tasks
 
