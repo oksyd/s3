@@ -9,7 +9,7 @@ documentation = "https://docs.rs/s3"
 keywords = ["s3", "object-storage", "aws", "minio", "sigv4"]
 categories = ["api-bindings", "web-programming::http-client"]
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.98.1"
 license = "MIT"
 include = [
   "Cargo.toml",
@@ -23,48 +23,39 @@ include = [
 ]
 
 [dependencies]
-# Core protocol and shared types
-bytes = { version = "1.11.1", default-features = false, features = ["std"] }
-http = { version = "1.4.0", default-features = false, features = ["std"] }
+bytes = { version = "1.12.1", default-features = false, features = ["std"] }
+http = { version = "1.5.0", default-features = false, features = ["std"] }
 httpdate = { version = "1.0.3", default-features = false }
-time = { version = "0.3.47", default-features = false, features = ["std", "parsing"] }
+time = { version = "0.3.55", default-features = false, features = ["std", "parsing"] }
 url = { version = "2.5.8", default-features = false, features = ["std"] }
 
-# SigV4 signing and hashing
-base64 = { version = "0.22.1", default-features = false, features = ["std"] }
-hex = { version = "0.4.3", default-features = false, features = ["std"] }
-graviola = { version = "0.3.4", default-features = false }
-md-5 = { version = "0.11.0", default-features = false }
-
-# Transport backend (feature-gated)
-reqx = { version = "0.1.40", default-features = false, optional = true }
-http-body-util = { version = "0.1.3", default-features = false, optional = true }
-
-# XML and data decoding
-quick-xml = { version = "0.41.0", default-features = false, features = ["serialize"] }
-serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
-serde_json = { version = "1.0.149", default-features = false, features = ["std"], optional = true }
-
-# Async runtime and stream utils (feature-gated)
-futures-core = { version = "0.3.32", default-features = false, features = ["std"], optional = true }
-futures-io = { version = "0.3.32", default-features = false, features = ["std"], optional = true }
-futures-util = { version = "0.3.32", default-features = false, features = ["std", "io"], optional = true }
-tokio = { version = "1.52.1", default-features = false, features = ["time", "sync", "io-util"], optional = true }
-
-# Optional capabilities
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 crc-fast = { version = "1.10.0", default-features = false, features = ["std"], optional = true }
+graviola = { version = "0.4.1", default-features = false }
+hex = { version = "0.4.3", default-features = false, features = ["std"] }
+md-5 = { version = "0.11.0", default-features = false }
 sha1 = { version = "0.11.0", default-features = false, optional = true }
-metrics = { version = "0.24.3", default-features = false, optional = true }
+
+quick-xml = { version = "0.42.0", default-features = false, features = ["serialize"] }
+serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0.151", default-features = false, features = ["std"], optional = true }
+
+futures-core = { version = "0.3.34", default-features = false, features = ["std"], optional = true }
+futures-io = { version = "0.3.34", default-features = false, features = ["std"], optional = true }
+futures-util = { version = "0.3.34", default-features = false, features = ["std", "io"], optional = true }
+http-body-util = { version = "0.1.5", default-features = false, optional = true }
+reqx = { version = "0.2.5", default-features = false, optional = true }
+tokio = { version = "1.53.1", default-features = false, features = ["time", "sync", "io-util"], optional = true }
+
+metrics = { version = "0.24.6", default-features = false, optional = true }
 tracing = { version = "0.1.44", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
-# Benchmarks
 criterion = { version = "0.8.2" }
 
-# Compatibility and integration tests
-reqwest = { version = "0.13.2", default-features = false, features = ["stream"] }
-tokio = { version = "1.52.1", default-features = false, features = ["macros", "rt-multi-thread", "time", "io-util"] }
-ureq = { version = "3.3.0", default-features = false }
+reqwest = { version = "0.13.5", default-features = false, features = ["stream"] }
+tokio = { version = "1.53.1", default-features = false, features = ["macros", "rt-multi-thread", "time", "io-util"] }
+ureq = { version = "3.4.2", default-features = false }
 
 [features]
 default = ["async", "rustls"]
