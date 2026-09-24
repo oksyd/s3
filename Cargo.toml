@@ -31,7 +31,7 @@ time = { version = "0.3.47", default-features = false, features = ["std", "parsi
 url = { version = "2.5.8", default-features = false, features = ["std"] }
 
 # SigV4 signing and hashing
-base64 = { version = "0.22.1", default-features = false, features = ["std"] }
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 hex = { version = "0.4.3", default-features = false, features = ["std"] }
 graviola = { version = "0.3.4", default-features = false }
 md-5 = { version = "0.11.0", default-features = false }
