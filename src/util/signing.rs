@@ -1,7 +1,5 @@
-use bytes::Bytes;
-use graviola::hashing::{Hash as _, Sha256, hmac::Hmac};
+use graviola::hashing::{Hash as _, HashOutput, Sha256, hmac::Hmac};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
-use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
 use crate::{
@@ -14,6 +12,8 @@ use crate::{
 type HmacSha256 = Hmac<Sha256>;
 
 pub(crate) const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
+pub(crate) const EMPTY_PAYLOAD_HASH: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const DEFAULT_SERVICE: &str = "s3";
 
 #[derive(Clone, Copy)]
@@ -48,33 +48,7 @@ impl<'a> SigV4Params<'a> {
     }
 }
 
-pub(crate) fn payload_hash_bytes(body: &Bytes) -> String {
-    hex::encode(Sha256::hash(body.as_ref()).as_ref())
-}
-
-pub(crate) fn payload_hash_empty() -> String {
-    payload_hash_bytes(&Bytes::new())
-}
-
 pub(crate) fn sign_headers(
-    method: &Method,
-    resolved: &ResolvedUrl,
-    headers: &mut HeaderMap,
-    payload_hash: &str,
-    region: &Region,
-    credentials: &Credentials,
-    now: OffsetDateTime,
-) -> Result<(), Error> {
-    sign_headers_with_service(
-        method,
-        resolved,
-        headers,
-        payload_hash,
-        SigV4Params::for_s3(region, credentials, now),
-    )
-}
-
-pub(crate) fn sign_headers_with_service(
     method: &Method,
     resolved: &ResolvedUrl,
     headers: &mut HeaderMap,
@@ -109,7 +83,7 @@ pub(crate) fn sign_headers_with_service(
         params.service,
         params.now,
         &string_to_sign,
-    )?;
+    );
 
     let credential_scope = credential_scope(params.region, params.service, params.now);
     let authorization = format!(
@@ -132,17 +106,17 @@ pub(crate) fn presign(
     resolved: ResolvedUrl,
     params: SigV4Params<'_>,
     expires_in: std::time::Duration,
-    existing_query_params: &[(String, String)],
-    headers: &HeaderMap,
+    mut query_params: Vec<(String, String)>,
+    mut headers: HeaderMap,
 ) -> Result<PresignedRequest, Error> {
     let mut resolved = resolved;
     let expires = validate_presign_expires(expires_in)?;
-    validate_existing_presign_query_params(existing_query_params)?;
-    validate_presign_headers(headers)?;
+    validate_existing_presign_query_params(&query_params)?;
+    validate_presign_headers(&headers)?;
 
-    let mut signing_headers = headers.clone();
-    signing_headers.insert(http::header::HOST, host_header_value(&resolved.url)?);
-    let (canonical_headers, signed_headers) = canonicalize_headers(&signing_headers)?;
+    headers.insert(http::header::HOST, host_header_value(&resolved.url)?);
+    let (canonical_headers, signed_headers) = canonicalize_headers(&headers)?;
+    headers.remove(http::header::HOST);
 
     let amz_date = amz_datetime(params.now);
     let credential_scope = credential_scope(params.region, params.service, params.now);
@@ -152,7 +126,6 @@ pub(crate) fn presign(
         credential_scope
     );
 
-    let mut query_params = existing_query_params.to_vec();
     query_params.push((
         "X-Amz-Algorithm".to_string(),
         "AWS4-HMAC-SHA256".to_string(),
@@ -168,10 +141,6 @@ pub(crate) fn presign(
     }
 
     resolved.canonical_query_string = crate::util::encode::canonical_query_string(&query_params);
-    resolved
-        .url
-        .set_query(Some(&resolved.canonical_query_string));
-
     let canonical_request = canonical_request(
         &method,
         &resolved.canonical_uri,
@@ -193,7 +162,7 @@ pub(crate) fn presign(
         params.service,
         params.now,
         &string_to_sign,
-    )?;
+    );
 
     query_params.push(("X-Amz-Signature".to_string(), sig));
     let final_query = crate::util::encode::canonical_query_string(&query_params);
@@ -202,7 +171,7 @@ pub(crate) fn presign(
     Ok(PresignedRequest {
         method,
         url: resolved.url,
-        headers: headers.clone(),
+        headers,
     })
 }
 
@@ -356,34 +325,32 @@ fn host_header_value(url: &url::Url) -> Result<HeaderValue, Error> {
 }
 
 fn canonicalize_headers(headers: &HeaderMap) -> Result<(String, String), Error> {
-    let mut headers_by_name = BTreeMap::<String, Vec<String>>::new();
-    for (name, value) in headers {
-        let name_str = name.as_str();
-        if !should_sign_header(name_str) {
-            continue;
-        }
-
-        let value_str = value
-            .to_str()
-            .map_err(|_| Error::signing(format!("invalid {name_str} header value for signing")))?;
-        headers_by_name
-            .entry(name_str.to_ascii_lowercase())
-            .or_default()
-            .push(normalize_header_value(value_str));
-    }
+    let mut names: Vec<_> = headers
+        .keys()
+        .filter(|name| should_sign_header(name.as_str()))
+        .collect();
+    names.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
 
     let mut canonical_headers = String::new();
     let mut signed_headers = String::new();
-    for (idx, (name, values)) in headers_by_name.into_iter().enumerate() {
-        canonical_headers.push_str(&name);
+    for (idx, name) in names.into_iter().enumerate() {
+        canonical_headers.push_str(name.as_str());
         canonical_headers.push(':');
-        canonical_headers.push_str(&values.join(","));
+        for (value_idx, value) in headers.get_all(name).iter().enumerate() {
+            let value = value
+                .to_str()
+                .map_err(|_| Error::signing(format!("invalid {name} header value for signing")))?;
+            if value_idx > 0 {
+                canonical_headers.push(',');
+            }
+            append_normalized_header_value(&mut canonical_headers, value);
+        }
         canonical_headers.push('\n');
 
         if idx > 0 {
             signed_headers.push(';');
         }
-        signed_headers.push_str(&name);
+        signed_headers.push_str(name.as_str());
     }
 
     Ok((canonical_headers, signed_headers))
@@ -403,21 +370,19 @@ fn should_sign_header(name: &str) -> bool {
     }
 }
 
-fn normalize_header_value(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
+fn append_normalized_header_value(out: &mut String, value: &str) {
     let mut in_ws = false;
     for c in value.trim().chars() {
         if c.is_whitespace() {
             in_ws = true;
             continue;
         }
-        if in_ws && !out.is_empty() {
+        if in_ws {
             out.push(' ');
         }
         in_ws = false;
         out.push(c);
     }
-    out
 }
 
 fn canonical_request(
@@ -451,25 +416,25 @@ fn signature(
     service: &str,
     now: OffsetDateTime,
     string_to_sign: &str,
-) -> Result<String, Error> {
+) -> String {
     let k_date = hmac_sha256(
         format!("AWS4{}", credentials.secret_access_key()).as_bytes(),
         date_stamp(now).as_bytes(),
-    )?;
-    let k_region = hmac_sha256(&k_date, region.as_str().as_bytes())?;
-    let k_service = hmac_sha256(&k_region, service.as_bytes())?;
-    let k_signing = hmac_sha256(&k_service, b"aws4_request")?;
-    let sig = hmac_sha256(&k_signing, string_to_sign.as_bytes())?;
-    Ok(hex::encode(sig))
+    );
+    let k_region = hmac_sha256(k_date.as_ref(), region.as_str().as_bytes());
+    let k_service = hmac_sha256(k_region.as_ref(), service.as_bytes());
+    let k_signing = hmac_sha256(k_service.as_ref(), b"aws4_request");
+    let sig = hmac_sha256(k_signing.as_ref(), string_to_sign.as_bytes());
+    hex::encode(sig.as_ref())
 }
 
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
+fn hmac_sha256(key: &[u8], data: &[u8]) -> HashOutput {
     let mut mac = HmacSha256::new(key);
     mac.update(data);
-    Ok(mac.finish().as_ref().to_vec())
+    mac.finish()
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::hash(data).as_ref())
 }
 
@@ -505,6 +470,67 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn signatures_match_aws_documented_examples() {
+        // https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sig-v4-header-based-auth.html
+        // https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sigv4-query-string-auth.html
+        let endpoint = url::Url::parse("https://s3.amazonaws.com").unwrap();
+        let region = Region::new("us-east-1").unwrap();
+        let creds = Credentials::new(
+            "AKIAIOSFODNN7EXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        )
+        .unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
+        let resolved = s3_url::resolve_url(
+            &endpoint,
+            Some("examplebucket"),
+            Some("test.txt"),
+            &[],
+            AddressingStyle::VirtualHosted,
+        )
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::RANGE, HeaderValue::from_static("bytes=0-9"));
+        sign_headers(
+            &Method::GET,
+            &resolved,
+            &mut headers,
+            EMPTY_PAYLOAD_HASH,
+            SigV4Params::for_s3(&region, &creds, now),
+        )
+        .unwrap();
+        let authorization = headers
+            .get(http::header::AUTHORIZATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            authorization.rsplit_once("Signature=").unwrap().1,
+            "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41",
+        );
+
+        let presigned = presign(
+            Method::GET,
+            resolved,
+            SigV4Params::for_s3(&region, &creds, now),
+            Duration::from_secs(86_400),
+            Vec::new(),
+            HeaderMap::new(),
+        )
+        .unwrap();
+        let (_, signature) = presigned
+            .url
+            .query_pairs()
+            .find(|(name, _)| name == "X-Amz-Signature")
+            .unwrap();
+        assert_eq!(
+            signature,
+            "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+        );
+    }
+
+    #[test]
     fn signs_headers_and_sets_expected_fields() {
         let endpoint = url::Url::parse("https://example.com").unwrap();
         let region = Region::new("us-east-1").unwrap();
@@ -526,10 +552,8 @@ mod tests {
             &Method::GET,
             &resolved,
             &mut headers,
-            &payload_hash_empty(),
-            &region,
-            &creds,
-            now,
+            EMPTY_PAYLOAD_HASH,
+            SigV4Params::for_s3(&region, &creds, now),
         )
         .unwrap();
 
@@ -582,10 +606,8 @@ mod tests {
             &Method::GET,
             &resolved,
             &mut headers,
-            &payload_hash_empty(),
-            &region,
-            &creds,
-            now,
+            EMPTY_PAYLOAD_HASH,
+            SigV4Params::for_s3(&region, &creds, now),
         )
         .expect_err("non-UTF-8 signed header values must be rejected");
 
@@ -627,10 +649,8 @@ mod tests {
             &Method::GET,
             &resolved,
             &mut headers,
-            &payload_hash_empty(),
-            &region,
-            &creds,
-            now,
+            EMPTY_PAYLOAD_HASH,
+            SigV4Params::for_s3(&region, &creds, now),
         )
         .unwrap();
 
@@ -664,8 +684,8 @@ mod tests {
             resolved,
             SigV4Params::for_s3(&region, &creds, now),
             Duration::from_secs(60),
-            &[],
-            &HeaderMap::new(),
+            Vec::new(),
+            HeaderMap::new(),
         )
         .unwrap();
 
@@ -703,18 +723,24 @@ mod tests {
             HeaderValue::from_static("text/plain"),
         );
 
+        headers.insert(
+            http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        );
+        let expected_headers = headers.clone();
         let presigned = presign(
             Method::PUT,
             resolved,
             SigV4Params::for_s3(&region, &creds, now),
             Duration::from_secs(60),
-            &[],
-            &headers,
+            Vec::new(),
+            headers,
         )
         .unwrap();
 
         let s = presigned.url.as_str();
         assert!(s.contains("X-Amz-SignedHeaders=content-type%3Bhost"));
+        assert_eq!(presigned.headers, expected_headers);
         assert_eq!(
             presigned
                 .headers
@@ -761,8 +787,8 @@ mod tests {
             resolved,
             SigV4Params::for_s3(&region, &creds, now),
             Duration::from_secs(60),
-            &[("X-Amz-Signature".to_string(), "fake".to_string())],
-            &HeaderMap::new(),
+            vec![("X-Amz-Signature".to_string(), "fake".to_string())],
+            HeaderMap::new(),
         )
         .expect_err("reserved x-amz-* query names must be rejected");
 
@@ -795,11 +821,11 @@ mod tests {
             resolved,
             SigV4Params::for_s3(&region, &creds, now),
             Duration::from_secs(60),
-            &[(
+            vec![(
                 " response-content-type".to_string(),
                 "text/plain".to_string(),
             )],
-            &HeaderMap::new(),
+            HeaderMap::new(),
         )
         .expect_err("query names with outer whitespace must be rejected");
 
@@ -832,11 +858,11 @@ mod tests {
             resolved,
             SigV4Params::for_s3(&region, &creds, now),
             Duration::from_secs(60),
-            &[(
+            vec![(
                 "response content type".to_string(),
                 "text/plain".to_string(),
             )],
-            &HeaderMap::new(),
+            HeaderMap::new(),
         )
         .expect_err("query names with internal whitespace must be rejected");
 
@@ -869,11 +895,11 @@ mod tests {
             resolved,
             SigV4Params::for_s3(&region, &creds, now),
             Duration::from_secs(60),
-            &[(
+            vec![(
                 "response-content-disposition".to_string(),
                 "attachment\nfilename=report.csv".to_string(),
             )],
-            &HeaderMap::new(),
+            HeaderMap::new(),
         )
         .expect_err("query values with control characters must be rejected");
 
@@ -916,8 +942,8 @@ mod tests {
                 resolved,
                 SigV4Params::for_s3(&region, &creds, now),
                 Duration::from_secs(60),
-                &[],
-                &headers,
+                Vec::new(),
+                headers,
             )
             .expect_err("SigV4-managed headers must be rejected");
 
@@ -953,8 +979,8 @@ mod tests {
             resolved,
             SigV4Params::for_s3(&region, &creds, now),
             Duration::from_secs(60),
-            &[],
-            &headers,
+            Vec::new(),
+            headers,
         )
         .expect_err("non-UTF-8 signed header values must be rejected");
 

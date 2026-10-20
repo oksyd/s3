@@ -28,7 +28,6 @@ impl CredentialsProvider for StaticProvider {
 }
 
 #[cfg(feature = "async")]
-#[allow(clippy::result_large_err)]
 #[tokio::main]
 async fn main() -> Result<(), s3::Error> {
     let provider = StaticProvider {

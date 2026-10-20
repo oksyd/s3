@@ -8,113 +8,67 @@ use crate::{
 
 const S3_XMLNS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 
+fn parse_response_xml<T: serde::de::DeserializeOwned>(body: &str, root: &str) -> Result<T, Error> {
+    use quick_xml::{Reader, events::Event};
+
+    // Serde deserializes fields without checking the XML document's root name.
+    // Check it before optional fields can turn an unrelated document into success.
+    let mut reader = Reader::from_str(body);
+    loop {
+        match reader.read_event().map_err(|error| {
+            Error::decode(
+                format!("invalid {root} XML response"),
+                Some(Box::new(error)),
+            )
+        })? {
+            Event::Decl(_) | Event::Comment(_) | Event::PI(_) => continue,
+            Event::Text(text) if text.as_ref().bytes().all(|b| b.is_ascii_whitespace()) => continue,
+            Event::Start(element) | Event::Empty(element)
+                if element.local_name().as_ref() == root =>
+            {
+                break;
+            }
+            _ => return Err(Error::decode(format!("expected {root} XML response"), None)),
+        }
+    }
+
+    quick_xml::de::from_str(body).map_err(|error| {
+        Error::decode(
+            format!("failed to parse {root} XML response"),
+            Some(Box::new(error)),
+        )
+    })
+}
+
+#[derive(serde::Deserialize)]
+enum XmlServiceError {
+    Error(xml::XmlError),
+    ErrorResponse {
+        #[serde(rename = "Error")]
+        error: xml::XmlError,
+        #[serde(rename = "RequestId")]
+        request_id: Option<String>,
+        #[serde(rename = "HostId")]
+        host_id: Option<String>,
+    },
+}
+
 pub(crate) fn parse_error_xml(body: &str) -> Option<xml::XmlError> {
-    if body.trim().is_empty() {
-        return None;
-    }
-
-    let fragment = extract_error_fragment(body)?;
-    let mut parsed = quick_xml::de::from_str::<xml::XmlError>(fragment).ok()?;
-    if parsed.request_id.is_none() {
-        parsed.request_id = extract_tag_text(body, "RequestId");
-    }
-    if parsed.host_id.is_none() {
-        parsed.host_id = extract_tag_text(body, "HostId");
-    }
-    normalize_error_fields(parsed)
-}
-
-fn extract_error_fragment(body: &str) -> Option<&str> {
-    let root_start = find_root_element_start(body)?;
-    let root_name = element_name(body, root_start)?;
-
-    match local_xml_name(root_name) {
-        "Error" => extract_element_fragment(body, root_start, root_name),
-        "ErrorResponse" => {
-            let root = extract_element_fragment(body, root_start, root_name)?;
-            let error_start = find_element_start(root, "Error")?;
-            let error_name = element_name(root, error_start)?;
-            extract_element_fragment(root, error_start, error_name)
+    let error = match quick_xml::de::from_str::<XmlServiceError>(body).ok()? {
+        XmlServiceError::Error(error) => error,
+        XmlServiceError::ErrorResponse {
+            mut error,
+            request_id,
+            host_id,
+        } => {
+            trim_optional_string(&mut error.request_id);
+            trim_optional_string(&mut error.host_id);
+            error.request_id = error.request_id.or(request_id);
+            error.host_id = error.host_id.or(host_id);
+            error
         }
-        _ => None,
-    }
-}
-
-fn find_root_element_start(body: &str) -> Option<usize> {
-    let mut offset = 0;
-    loop {
-        let rest = body.get(offset..)?;
-        let relative_start = rest.find('<')?;
-        let start = offset + relative_start;
-        if !body.get(offset..start)?.trim().is_empty() {
-            return None;
-        }
-
-        let tail = body.get(start..)?;
-        if tail.starts_with("<?") {
-            offset = start + tail.find("?>")? + 2;
-            continue;
-        }
-        if tail.starts_with("<!--") {
-            offset = start + tail.find("-->")? + 3;
-            continue;
-        }
-        if tail.starts_with("<!") {
-            offset = start + tail.find('>')? + 1;
-            continue;
-        }
-
-        return Some(start);
-    }
-}
-
-fn find_element_start(body: &str, local_name: &str) -> Option<usize> {
-    let mut offset = 0;
-    loop {
-        let start = offset + body.get(offset..)?.find('<')?;
-        if let Some(name) = element_name(body, start)
-            && local_xml_name(name) == local_name
-        {
-            return Some(start);
-        }
-        offset = start + 1;
-    }
-}
-
-fn element_name(body: &str, start: usize) -> Option<&str> {
-    let after_lt = body.get(start + 1..)?;
-    if after_lt.starts_with('/') || after_lt.starts_with('?') || after_lt.starts_with('!') {
-        return None;
-    }
-    let end = after_lt
-        .find(|c: char| c == '>' || c == '/' || c.is_whitespace())
-        .unwrap_or(after_lt.len());
-    let name = after_lt.get(..end)?;
-    if name.is_empty() { None } else { Some(name) }
-}
-
-fn local_xml_name(name: &str) -> &str {
-    name.rsplit_once(':').map_or(name, |(_, local)| local)
-}
-
-fn extract_element_fragment<'a>(body: &'a str, start: usize, name: &str) -> Option<&'a str> {
-    let open_end = body.get(start..)?.find('>')? + start;
-    let close_tag = format!("</{name}>");
-    let close_start = body.get(open_end + 1..)?.find(&close_tag)? + open_end + 1;
-    let close_end = close_start + close_tag.len();
-    body.get(start..close_end)
-}
-
-fn extract_tag_text(body: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = body.find(&open)? + open.len();
-    let end = body[start..].find(&close)? + start;
-    let value = body.get(start..end)?.trim();
-    if value.is_empty() {
-        return None;
-    }
-    Some(value.to_string())
+    };
+    normalize_error_fields(error)
 }
 
 fn normalize_error_fields(mut error: xml::XmlError) -> Option<xml::XmlError> {
@@ -144,34 +98,21 @@ fn trim_optional_string(value: &mut Option<String>) {
 }
 
 pub(crate) fn parse_list_objects_v2(body: &str) -> Result<types::ListObjectsV2Output, Error> {
-    let parsed = quick_xml::de::from_str::<xml::XmlListBucketResult>(body).map_err(|e| {
-        Error::decode(
-            "failed to parse ListObjectsV2 XML response",
-            Some(Box::new(e)),
-        )
-    })?;
-    types::ListObjectsV2Output::try_from(parsed)
+    let parsed = parse_response_xml::<xml::XmlListBucketResult>(body, "ListBucketResult")?;
+    Ok(types::ListObjectsV2Output::from(parsed))
 }
 
 pub(crate) fn parse_list_buckets(body: &str) -> Result<types::ListBucketsOutput, Error> {
-    let parsed = quick_xml::de::from_str::<xml::XmlListAllMyBucketsResult>(body).map_err(|e| {
-        Error::decode(
-            "failed to parse ListBuckets XML response",
-            Some(Box::new(e)),
-        )
-    })?;
+    let parsed =
+        parse_response_xml::<xml::XmlListAllMyBucketsResult>(body, "ListAllMyBucketsResult")?;
     Ok(types::ListBucketsOutput::from(parsed))
 }
 
 pub(crate) fn parse_bucket_versioning(
     body: &str,
 ) -> Result<types::BucketVersioningConfiguration, Error> {
-    let parsed = quick_xml::de::from_str::<xml::XmlVersioningConfiguration>(body).map_err(|e| {
-        Error::decode(
-            "failed to parse GetBucketVersioning XML response",
-            Some(Box::new(e)),
-        )
-    })?;
+    let parsed =
+        parse_response_xml::<xml::XmlVersioningConfiguration>(body, "VersioningConfiguration")?;
 
     Ok(types::BucketVersioningConfiguration {
         status: parsed
@@ -190,12 +131,8 @@ pub(crate) fn parse_bucket_versioning(
 pub(crate) fn parse_bucket_lifecycle(
     body: &str,
 ) -> Result<types::BucketLifecycleConfiguration, Error> {
-    let parsed = quick_xml::de::from_str::<xml::XmlLifecycleConfiguration>(body).map_err(|e| {
-        Error::decode(
-            "failed to parse GetBucketLifecycle XML response",
-            Some(Box::new(e)),
-        )
-    })?;
+    let parsed =
+        parse_response_xml::<xml::XmlLifecycleConfiguration>(body, "LifecycleConfiguration")?;
 
     let rules = parsed
         .rules
@@ -207,12 +144,7 @@ pub(crate) fn parse_bucket_lifecycle(
 }
 
 pub(crate) fn parse_bucket_cors(body: &str) -> Result<types::BucketCorsConfiguration, Error> {
-    let parsed = quick_xml::de::from_str::<xml::XmlCorsConfiguration>(body).map_err(|e| {
-        Error::decode(
-            "failed to parse GetBucketCors XML response",
-            Some(Box::new(e)),
-        )
-    })?;
+    let parsed = parse_response_xml::<xml::XmlCorsConfiguration>(body, "CORSConfiguration")?;
 
     Ok(types::BucketCorsConfiguration {
         rules: parsed
@@ -235,25 +167,17 @@ pub(crate) fn parse_bucket_cors(body: &str) -> Result<types::BucketCorsConfigura
 }
 
 pub(crate) fn parse_bucket_tagging(body: &str) -> Result<types::BucketTagging, Error> {
-    let parsed = quick_xml::de::from_str::<xml::XmlTagging>(body).map_err(|e| {
-        Error::decode(
-            "failed to parse GetBucketTagging XML response",
-            Some(Box::new(e)),
-        )
-    })?;
+    let parsed = parse_response_xml::<xml::XmlTagging>(body, "Tagging")?;
 
     let tags = parsed
         .tag_set
-        .map(|ts| {
-            ts.tags
-                .into_iter()
-                .map(|t| types::Tag {
-                    key: t.key,
-                    value: t.value,
-                })
-                .collect()
+        .tags
+        .into_iter()
+        .map(|t| types::Tag {
+            key: t.key,
+            value: t.value,
         })
-        .unwrap_or_default();
+        .collect();
 
     Ok(types::BucketTagging { tags })
 }
@@ -261,13 +185,10 @@ pub(crate) fn parse_bucket_tagging(body: &str) -> Result<types::BucketTagging, E
 pub(crate) fn parse_bucket_encryption(
     body: &str,
 ) -> Result<types::BucketEncryptionConfiguration, Error> {
-    let parsed = quick_xml::de::from_str::<xml::XmlServerSideEncryptionConfiguration>(body)
-        .map_err(|e| {
-            Error::decode(
-                "failed to parse GetBucketEncryption XML response",
-                Some(Box::new(e)),
-            )
-        })?;
+    let parsed = parse_response_xml::<xml::XmlServerSideEncryptionConfiguration>(
+        body,
+        "ServerSideEncryptionConfiguration",
+    )?;
 
     let rules = parsed
         .rules
@@ -281,13 +202,10 @@ pub(crate) fn parse_bucket_encryption(
 pub(crate) fn parse_bucket_public_access_block(
     body: &str,
 ) -> Result<types::BucketPublicAccessBlockConfiguration, Error> {
-    let parsed =
-        quick_xml::de::from_str::<xml::XmlPublicAccessBlockConfiguration>(body).map_err(|e| {
-            Error::decode(
-                "failed to parse GetPublicAccessBlock XML response",
-                Some(Box::new(e)),
-            )
-        })?;
+    let parsed = parse_response_xml::<xml::XmlPublicAccessBlockConfiguration>(
+        body,
+        "PublicAccessBlockConfiguration",
+    )?;
 
     Ok(types::BucketPublicAccessBlockConfiguration {
         block_public_acls: required_public_access_block_field(
@@ -310,18 +228,12 @@ pub(crate) fn parse_bucket_public_access_block(
 }
 
 pub(crate) fn parse_delete_objects(body: &str) -> Result<types::DeleteObjectsOutput, Error> {
-    let parsed = quick_xml::de::from_str::<xml::XmlDeleteResult>(body).map_err(|e| {
-        Error::decode(
-            "failed to parse DeleteObjects XML response",
-            Some(Box::new(e)),
-        )
-    })?;
+    let parsed = parse_response_xml::<xml::XmlDeleteResult>(body, "DeleteResult")?;
     Ok(types::DeleteObjectsOutput::from(parsed))
 }
 
 pub(crate) fn parse_copy_object(body: &str) -> Result<types::CopyObjectOutput, Error> {
-    let parsed = quick_xml::de::from_str::<xml::XmlCopyObjectResult>(body)
-        .map_err(|e| Error::decode("failed to parse CopyObject XML response", Some(Box::new(e))))?;
+    let parsed = parse_response_xml::<xml::XmlCopyObjectResult>(body, "CopyObjectResult")?;
     Ok(types::CopyObjectOutput::from(parsed))
 }
 
@@ -329,13 +241,10 @@ pub(crate) fn parse_copy_object(body: &str) -> Result<types::CopyObjectOutput, E
 pub(crate) fn parse_create_multipart_upload(
     body: &str,
 ) -> Result<types::CreateMultipartUploadOutput, Error> {
-    let parsed =
-        quick_xml::de::from_str::<xml::XmlInitiateMultipartUploadResult>(body).map_err(|e| {
-            Error::decode(
-                "failed to parse CreateMultipartUpload XML response",
-                Some(Box::new(e)),
-            )
-        })?;
+    let parsed = parse_response_xml::<xml::XmlInitiateMultipartUploadResult>(
+        body,
+        "InitiateMultipartUploadResult",
+    )?;
     Ok(types::CreateMultipartUploadOutput::from(parsed))
 }
 
@@ -343,31 +252,22 @@ pub(crate) fn parse_create_multipart_upload(
 pub(crate) fn parse_complete_multipart_upload(
     body: &str,
 ) -> Result<types::CompleteMultipartUploadOutput, Error> {
-    let parsed =
-        quick_xml::de::from_str::<xml::XmlCompleteMultipartUploadResult>(body).map_err(|e| {
-            Error::decode(
-                "failed to parse CompleteMultipartUpload XML response",
-                Some(Box::new(e)),
-            )
-        })?;
+    let parsed = parse_response_xml::<xml::XmlCompleteMultipartUploadResult>(
+        body,
+        "CompleteMultipartUploadResult",
+    )?;
     Ok(types::CompleteMultipartUploadOutput::from(parsed))
 }
 
 #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
 pub(crate) fn parse_list_parts(body: &str) -> Result<types::ListPartsOutput, Error> {
-    let parsed = quick_xml::de::from_str::<xml::XmlListPartsResult>(body)
-        .map_err(|e| Error::decode("failed to parse ListParts XML response", Some(Box::new(e))))?;
+    let parsed = parse_response_xml::<xml::XmlListPartsResult>(body, "ListPartsResult")?;
     Ok(types::ListPartsOutput::from(parsed))
 }
 
 #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
 pub(crate) fn parse_upload_part_copy(body: &str) -> Result<types::UploadPartCopyOutput, Error> {
-    let parsed = quick_xml::de::from_str::<xml::XmlCopyPartResult>(body).map_err(|e| {
-        Error::decode(
-            "failed to parse UploadPartCopy XML response",
-            Some(Box::new(e)),
-        )
-    })?;
+    let parsed = parse_response_xml::<xml::XmlCopyPartResult>(body, "CopyPartResult")?;
     Ok(types::UploadPartCopyOutput::from(parsed))
 }
 
@@ -402,15 +302,9 @@ pub(crate) fn encode_create_bucket_configuration(region: &str) -> Result<Bytes, 
 }
 
 #[cfg(feature = "multipart")]
-pub(crate) fn encode_complete_multipart_upload(
-    parts: &[types::CompletedPart],
+pub(crate) fn encode_complete_multipart_upload<'a>(
+    parts: impl IntoIterator<Item = &'a types::CompletedPart>,
 ) -> Result<Bytes, Error> {
-    if parts.is_empty() {
-        return Err(Error::invalid_config(
-            "complete multipart upload requires at least one part",
-        ));
-    }
-
     #[derive(serde::Serialize)]
     #[serde(rename = "CompleteMultipartUpload")]
     struct XmlOut<'a> {
@@ -428,15 +322,22 @@ pub(crate) fn encode_complete_multipart_upload(
         etag: &'a str,
     }
 
+    let parts: Vec<_> = parts
+        .into_iter()
+        .map(|p| XmlPart {
+            part_number: p.part_number(),
+            etag: p.etag(),
+        })
+        .collect();
+    if parts.is_empty() {
+        return Err(Error::invalid_config(
+            "complete_multipart_upload requires at least one completed part",
+        ));
+    }
+
     let xml = quick_xml::se::to_string(&XmlOut {
         xmlns: S3_XMLNS,
-        parts: parts
-            .iter()
-            .map(|p| XmlPart {
-                part_number: p.part_number(),
-                etag: p.etag(),
-            })
-            .collect(),
+        parts,
     })
     .map_err(|e| {
         Error::decode(
@@ -545,56 +446,50 @@ pub(crate) fn encode_bucket_lifecycle(
 
     #[derive(serde::Serialize)]
     #[serde(rename = "LifecycleConfiguration")]
-    struct XmlOut {
+    struct XmlOut<'a> {
         #[serde(rename = "@xmlns")]
         xmlns: &'static str,
         #[serde(rename = "Rule")]
-        rules: Vec<XmlRuleOut>,
+        rules: Vec<XmlRuleOut<'a>>,
     }
 
     #[derive(serde::Serialize)]
-    struct XmlRuleOut {
+    struct XmlRuleOut<'a> {
         #[serde(rename = "ID", skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
+        id: Option<&'a str>,
         #[serde(rename = "Status")]
         status: &'static str,
         #[serde(rename = "Filter", skip_serializing_if = "Option::is_none")]
-        filter: Option<XmlFilterOut>,
+        filter: Option<XmlFilterOut<'a>>,
         #[serde(rename = "Expiration", skip_serializing_if = "Option::is_none")]
-        expiration: Option<XmlExpirationOut>,
+        expiration: Option<XmlExpirationOut<'a>>,
     }
 
     #[derive(serde::Serialize)]
-    struct XmlFilterOut {
-        #[serde(rename = "Prefix", skip_serializing_if = "Option::is_none")]
-        prefix: Option<String>,
+    struct XmlFilterOut<'a> {
+        #[serde(rename = "Prefix")]
+        prefix: &'a str,
     }
 
     #[derive(serde::Serialize)]
-    struct XmlExpirationOut {
+    struct XmlExpirationOut<'a> {
         #[serde(rename = "Days", skip_serializing_if = "Option::is_none")]
         days: Option<u32>,
         #[serde(rename = "Date", skip_serializing_if = "Option::is_none")]
-        date: Option<String>,
+        date: Option<&'a str>,
     }
 
     let rules = configuration
         .rules
         .iter()
         .map(|r| XmlRuleOut {
-            id: r.id.clone(),
+            id: r.id.as_deref(),
             status: lifecycle_status_str(r.status),
-            filter: if r.prefix.is_some() {
-                Some(XmlFilterOut {
-                    prefix: r.prefix.clone(),
-                })
-            } else {
-                None
-            },
+            filter: r.prefix.as_deref().map(|prefix| XmlFilterOut { prefix }),
             expiration: if r.expiration_days.is_some() || r.expiration_date.is_some() {
                 Some(XmlExpirationOut {
                     days: r.expiration_days,
-                    date: r.expiration_date.clone(),
+                    date: r.expiration_date.as_deref(),
                 })
             } else {
                 None
@@ -622,25 +517,25 @@ pub(crate) fn encode_bucket_cors(
 
     #[derive(serde::Serialize)]
     #[serde(rename = "CORSConfiguration")]
-    struct XmlOut {
+    struct XmlOut<'a> {
         #[serde(rename = "@xmlns")]
         xmlns: &'static str,
         #[serde(rename = "CORSRule")]
-        rules: Vec<XmlRuleOut>,
+        rules: Vec<XmlRuleOut<'a>>,
     }
 
     #[derive(serde::Serialize)]
-    struct XmlRuleOut {
+    struct XmlRuleOut<'a> {
         #[serde(rename = "ID", skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
+        id: Option<&'a str>,
         #[serde(rename = "AllowedOrigin")]
-        allowed_origins: Vec<String>,
+        allowed_origins: &'a [String],
         #[serde(rename = "AllowedMethod")]
-        allowed_methods: Vec<String>,
-        #[serde(rename = "AllowedHeader", skip_serializing_if = "Vec::is_empty")]
-        allowed_headers: Vec<String>,
-        #[serde(rename = "ExposeHeader", skip_serializing_if = "Vec::is_empty")]
-        expose_headers: Vec<String>,
+        allowed_methods: Vec<&'a str>,
+        #[serde(rename = "AllowedHeader", skip_serializing_if = "<[String]>::is_empty")]
+        allowed_headers: &'a [String],
+        #[serde(rename = "ExposeHeader", skip_serializing_if = "<[String]>::is_empty")]
+        expose_headers: &'a [String],
         #[serde(rename = "MaxAgeSeconds", skip_serializing_if = "Option::is_none")]
         max_age_seconds: Option<u32>,
     }
@@ -651,15 +546,11 @@ pub(crate) fn encode_bucket_cors(
             .rules
             .iter()
             .map(|r| XmlRuleOut {
-                id: r.id.clone(),
-                allowed_origins: r.allowed_origins.clone(),
-                allowed_methods: r
-                    .allowed_methods
-                    .iter()
-                    .map(|m| m.as_str().to_string())
-                    .collect(),
-                allowed_headers: r.allowed_headers.clone(),
-                expose_headers: r.expose_headers.clone(),
+                id: r.id.as_deref(),
+                allowed_origins: &r.allowed_origins,
+                allowed_methods: r.allowed_methods.iter().map(|m| m.as_str()).collect(),
+                allowed_headers: &r.allowed_headers,
+                expose_headers: &r.expose_headers,
                 max_age_seconds: r.max_age_seconds,
             })
             .collect(),
@@ -673,25 +564,25 @@ pub(crate) fn encode_bucket_tagging(tagging: &types::BucketTagging) -> Result<By
 
     #[derive(serde::Serialize)]
     #[serde(rename = "Tagging")]
-    struct XmlOut {
+    struct XmlOut<'a> {
         #[serde(rename = "@xmlns")]
         xmlns: &'static str,
         #[serde(rename = "TagSet")]
-        tag_set: XmlTagSet,
+        tag_set: XmlTagSet<'a>,
     }
 
     #[derive(serde::Serialize)]
-    struct XmlTagSet {
+    struct XmlTagSet<'a> {
         #[serde(rename = "Tag")]
-        tags: Vec<XmlTag>,
+        tags: Vec<XmlTag<'a>>,
     }
 
     #[derive(serde::Serialize)]
-    struct XmlTag {
+    struct XmlTag<'a> {
         #[serde(rename = "Key")]
-        key: String,
+        key: &'a str,
         #[serde(rename = "Value")]
-        value: String,
+        value: &'a str,
     }
 
     let xml = quick_xml::se::to_string(&XmlOut {
@@ -701,8 +592,8 @@ pub(crate) fn encode_bucket_tagging(tagging: &types::BucketTagging) -> Result<By
                 .tags
                 .iter()
                 .map(|t| XmlTag {
-                    key: t.key.clone(),
-                    value: t.value.clone(),
+                    key: &t.key,
+                    value: &t.value,
                 })
                 .collect(),
         },
@@ -718,27 +609,27 @@ pub(crate) fn encode_bucket_encryption(
 
     #[derive(serde::Serialize)]
     #[serde(rename = "ServerSideEncryptionConfiguration")]
-    struct XmlOut {
+    struct XmlOut<'a> {
         #[serde(rename = "@xmlns")]
         xmlns: &'static str,
         #[serde(rename = "Rule")]
-        rules: Vec<XmlRuleOut>,
+        rules: Vec<XmlRuleOut<'a>>,
     }
 
     #[derive(serde::Serialize)]
-    struct XmlRuleOut {
+    struct XmlRuleOut<'a> {
         #[serde(rename = "ApplyServerSideEncryptionByDefault")]
-        apply: XmlApplyOut,
+        apply: XmlApplyOut<'a>,
         #[serde(rename = "BucketKeyEnabled", skip_serializing_if = "Option::is_none")]
         bucket_key_enabled: Option<bool>,
     }
 
     #[derive(serde::Serialize)]
-    struct XmlApplyOut {
+    struct XmlApplyOut<'a> {
         #[serde(rename = "SSEAlgorithm")]
-        sse_algorithm: String,
+        sse_algorithm: &'a str,
         #[serde(rename = "KMSMasterKeyID", skip_serializing_if = "Option::is_none")]
-        kms_master_key_id: Option<String>,
+        kms_master_key_id: Option<&'a str>,
     }
 
     let rules = configuration
@@ -746,8 +637,8 @@ pub(crate) fn encode_bucket_encryption(
         .iter()
         .map(|r| XmlRuleOut {
             apply: XmlApplyOut {
-                sse_algorithm: r.apply.sse_algorithm.as_str().to_string(),
-                kms_master_key_id: r.apply.kms_master_key_id.clone(),
+                sse_algorithm: r.apply.sse_algorithm.as_str(),
+                kms_master_key_id: r.apply.kms_master_key_id.as_deref(),
             },
             bucket_key_enabled: r.bucket_key_enabled,
         })
@@ -1230,6 +1121,48 @@ fn parse_sse_algorithm(value: &str) -> types::SseAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_parsers_reject_unrelated_xml_roots() {
+        let body = "<html><body>upstream error</body></html>";
+        assert!(parse_bucket_versioning(body).is_err());
+        assert!(parse_bucket_lifecycle(body).is_err());
+        assert!(parse_bucket_cors(body).is_err());
+        assert!(parse_bucket_tagging(body).is_err());
+        assert!(parse_bucket_encryption(body).is_err());
+        assert!(parse_list_buckets(body).is_err());
+        assert!(parse_delete_objects(body).is_err());
+        assert!(parse_copy_object(body).is_err());
+    }
+
+    #[test]
+    fn listings_require_explicit_truncation_state() {
+        assert!(
+            parse_list_objects_v2("<ListBucketResult><Name>bucket</Name></ListBucketResult>")
+                .is_err()
+        );
+        #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+        assert!(parse_list_parts("<ListPartsResult/>").is_err());
+    }
+
+    #[test]
+    fn empty_collections_require_their_xml_containers() {
+        assert!(parse_bucket_tagging("<Tagging/>").is_err());
+        assert!(parse_list_buckets("<ListAllMyBucketsResult/>").is_err());
+        assert!(
+            parse_bucket_tagging("<Tagging><TagSet/></Tagging>")
+                .unwrap()
+                .tags
+                .is_empty()
+        );
+        assert!(
+            parse_list_buckets("<ListAllMyBucketsResult><Buckets/></ListAllMyBucketsResult>")
+                .unwrap()
+                .buckets
+                .is_empty()
+        );
+        assert!(parse_bucket_versioning("<?xml version=\"1.0\"?><!-- empty --><s3:VersioningConfiguration xmlns:s3=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>").is_ok());
+    }
     use crate::types::DeleteObjectIdentifier;
 
     fn encoded_xml_to_string(xml: Bytes) -> String {
@@ -1301,6 +1234,35 @@ mod tests {
         assert_eq!(err.code, None);
         assert_eq!(err.message, None);
         assert_eq!(err.request_id.as_deref(), Some("req-only"));
+    }
+
+    #[test]
+    fn parses_namespaced_wrapped_errors_and_unescapes_outer_ids() {
+        let body = r#"<s:ErrorResponse xmlns:s="urn:test">
+            <s:Error><s:Code> AccessDenied </s:Code><s:RequestId> </s:RequestId></s:Error>
+            <s:RequestId>req&amp;outer</s:RequestId><s:HostId>host&amp;outer</s:HostId>
+        </s:ErrorResponse>"#;
+        let error = parse_error_xml(body).unwrap();
+        assert_eq!(error.code.as_deref(), Some("AccessDenied"));
+        assert_eq!(error.request_id.as_deref(), Some("req&outer"));
+        assert_eq!(error.host_id.as_deref(), Some("host&outer"));
+    }
+
+    #[test]
+    fn error_xml_respects_comments_and_cdata() {
+        let body = r#"<ErrorResponse>
+            <!-- <Error><Code>FakeError</Code></Error> -->
+            <Error><Code>AccessDenied</Code><Message><![CDATA[text </Error>]]></Message></Error>
+        </ErrorResponse>"#;
+        let error = parse_error_xml(body).unwrap();
+        assert_eq!(error.code.as_deref(), Some("AccessDenied"));
+        assert_eq!(error.message.as_deref(), Some("text </Error>"));
+    }
+
+    #[test]
+    fn ignores_malformed_error_envelopes() {
+        assert!(parse_error_xml("<ErrorResponse><Error><Code>Denied</Code></Error>").is_none());
+        assert!(parse_error_xml("<Error><Code>Denied</Code></Wrong>").is_none());
     }
 
     #[test]

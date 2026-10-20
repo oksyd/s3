@@ -1,7 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{borrow::Cow, sync::Arc, time::Duration};
 
+use crate::TlsRootStore;
 use http::{HeaderMap, Method};
-use reqx::advanced::TlsRootStore;
 use time::OffsetDateTime;
 use url::Url;
 
@@ -11,26 +11,9 @@ use crate::{
     api,
     auth::{AddressingStyle, Auth, Region},
     error::{Error, Result},
-    transport::blocking_transport::{BlockingBody, BlockingResponse, BlockingTransport},
+    transport::blocking_transport::{BlockingBody, BlockingTransport},
     util,
 };
-
-/// Trust root selection for blocking HTTPS requests.
-///
-/// This only affects the blocking transport when using HTTPS.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum BlockingTlsRootStore {
-    /// Use the backend default trust roots.
-    ///
-    /// For `rustls`, this is WebPKI roots when enabled by feature flags.
-    /// For `native-tls`, this follows the backend default behavior.
-    #[default]
-    BackendDefault,
-    /// Force WebPKI roots.
-    WebPki,
-    /// Use platform/system trust verification.
-    System,
-}
 
 /// Blocking S3 client.
 ///
@@ -54,7 +37,7 @@ pub struct BlockingClientBuilder {
     retry: crate::transport::RetryConfig,
     timeout: Option<Duration>,
     user_agent: Option<String>,
-    tls_root_store: BlockingTlsRootStore,
+    tls_root_store: TlsRootStore,
 }
 
 struct Inner {
@@ -99,7 +82,7 @@ impl BlockingClient {
         query_params: Vec<(String, String)>,
         mut headers: HeaderMap,
         body: BlockingBody,
-    ) -> Result<BlockingResponse> {
+    ) -> Result<reqx::Response> {
         #[cfg(feature = "tracing")]
         let _guard = tracing::info_span!(
             "s3.request",
@@ -110,36 +93,8 @@ impl BlockingClient {
         )
         .entered();
 
-        let resolved = util::url::resolve_url(
-            &self.inner.endpoint,
-            bucket,
-            key,
-            &query_params,
-            self.inner.addressing,
-        )?;
-
-        if let Some(snapshot) = self.inner.auth.credentials_snapshot_blocking()? {
-            let now = OffsetDateTime::now_utc();
-            let payload_hash = match &body {
-                BlockingBody::Empty => util::signing::payload_hash_empty(),
-                BlockingBody::Bytes(b) => util::signing::payload_hash_bytes(b),
-                BlockingBody::Reader { .. } => util::signing::UNSIGNED_PAYLOAD.to_string(),
-            };
-
-            sign_with_snapshot(
-                &method,
-                &resolved,
-                &mut headers,
-                &payload_hash,
-                &self.inner.region,
-                &snapshot,
-                now,
-            )?;
-        }
-
-        self.inner
-            .transport
-            .send(method, resolved.url, headers, body)
+        let url = self.prepare_request(&method, bucket, key, &query_params, &mut headers, &body)?;
+        self.inner.transport.send(method, url, headers, body)
     }
 
     pub(crate) fn execute_stream(
@@ -151,26 +106,49 @@ impl BlockingClient {
         mut headers: HeaderMap,
         body: BlockingBody,
     ) -> Result<reqx::blocking::ResponseStream> {
+        #[cfg(feature = "tracing")]
+        let _guard = tracing::info_span!(
+            "s3.request",
+            method = %method,
+            bucket_present = bucket.is_some(),
+            key_present = key.is_some(),
+            host = crate::transport::redacted_host_for_trace(&self.inner.endpoint),
+        )
+        .entered();
+
+        let url = self.prepare_request(&method, bucket, key, &query_params, &mut headers, &body)?;
+        self.inner.transport.send_stream(method, url, headers, body)
+    }
+
+    fn prepare_request(
+        &self,
+        method: &Method,
+        bucket: Option<&str>,
+        key: Option<&str>,
+        query_params: &[(String, String)],
+        headers: &mut HeaderMap,
+        body: &BlockingBody,
+    ) -> Result<Url> {
         let resolved = util::url::resolve_url(
             &self.inner.endpoint,
             bucket,
             key,
-            &query_params,
+            query_params,
             self.inner.addressing,
         )?;
 
         if let Some(snapshot) = self.inner.auth.credentials_snapshot_blocking()? {
             let now = OffsetDateTime::now_utc();
-            let payload_hash = match &body {
-                BlockingBody::Empty => util::signing::payload_hash_empty(),
-                BlockingBody::Bytes(b) => util::signing::payload_hash_bytes(b),
-                BlockingBody::Reader { .. } => util::signing::UNSIGNED_PAYLOAD.to_string(),
+            let payload_hash = match body {
+                BlockingBody::Empty => Cow::Borrowed(util::signing::EMPTY_PAYLOAD_HASH),
+                BlockingBody::Bytes(b) => Cow::Owned(util::signing::sha256_hex(b)),
+                BlockingBody::Stream { .. } => Cow::Borrowed(util::signing::UNSIGNED_PAYLOAD),
             };
 
             sign_with_snapshot(
-                &method,
+                method,
                 &resolved,
-                &mut headers,
+                headers,
                 &payload_hash,
                 &self.inner.region,
                 &snapshot,
@@ -178,9 +156,7 @@ impl BlockingClient {
             )?;
         }
 
-        self.inner
-            .transport
-            .send_stream(method, resolved.url, headers, body)
+        Ok(resolved.url)
     }
 
     pub(crate) fn presign(
@@ -202,7 +178,7 @@ impl BlockingClient {
             &self.inner.endpoint,
             Some(bucket),
             Some(key),
-            &query_params,
+            &[],
             self.inner.addressing,
         )?;
 
@@ -213,8 +189,8 @@ impl BlockingClient {
             resolved,
             util::signing::SigV4Params::for_s3(&self.inner.region, snapshot.credentials(), now),
             expires_in,
-            &query_params,
-            &headers,
+            query_params,
+            headers,
         )
     }
 }
@@ -231,7 +207,7 @@ impl BlockingClientBuilder {
             retry: crate::transport::RetryConfig::default(),
             timeout: None,
             user_agent: None,
-            tls_root_store: BlockingTlsRootStore::BackendDefault,
+            tls_root_store: TlsRootStore::BackendDefault,
         })
     }
 
@@ -259,7 +235,7 @@ impl BlockingClientBuilder {
         self
     }
 
-    /// Sets the maximum number of retry attempts.
+    /// Sets the maximum number of attempts, including the initial request.
     pub fn max_attempts(mut self, max_attempts: u32) -> Self {
         self.retry.max_attempts = max_attempts;
         self
@@ -293,7 +269,7 @@ impl BlockingClientBuilder {
     ///
     /// Builder default is `BackendDefault`.
     /// Use `System` for enterprise/private PKI environments that rely on OS trust stores.
-    pub fn tls_root_store(mut self, tls_root_store: BlockingTlsRootStore) -> Self {
+    pub fn tls_root_store(mut self, tls_root_store: TlsRootStore) -> Self {
         self.tls_root_store = tls_root_store;
         self
     }
@@ -323,16 +299,6 @@ impl BlockingClientBuilder {
     }
 }
 
-impl BlockingTlsRootStore {
-    pub(crate) const fn into_reqx(self) -> TlsRootStore {
-        match self {
-            Self::BackendDefault => TlsRootStore::BackendDefault,
-            Self::WebPki => TlsRootStore::WebPki,
-            Self::System => TlsRootStore::System,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,15 +307,15 @@ mod tests {
     fn builder_defaults_tls_root_store_to_backend_default() {
         let builder =
             BlockingClientBuilder::new("https://s3.example.com").expect("builder should parse");
-        assert_eq!(builder.tls_root_store, BlockingTlsRootStore::BackendDefault);
+        assert_eq!(builder.tls_root_store, TlsRootStore::BackendDefault);
     }
 
     #[test]
     fn builder_tls_root_store_override_is_applied() {
         let builder = BlockingClientBuilder::new("https://s3.example.com")
             .expect("builder should parse")
-            .tls_root_store(BlockingTlsRootStore::System);
-        assert_eq!(builder.tls_root_store, BlockingTlsRootStore::System);
+            .tls_root_store(TlsRootStore::System);
+        assert_eq!(builder.tls_root_store, TlsRootStore::System);
     }
 
     #[test]
@@ -391,7 +357,7 @@ mod tests {
             .expect("builder should parse")
             .region("us-east-1")
             .auth(Auth::Anonymous)
-            .tls_root_store(BlockingTlsRootStore::WebPki)
+            .tls_root_store(TlsRootStore::WebPki)
             .build();
         assert!(client.is_ok(), "rustls should accept WebPki root store");
     }
@@ -403,7 +369,7 @@ mod tests {
             .expect("builder should parse")
             .region("us-east-1")
             .auth(Auth::Anonymous)
-            .tls_root_store(BlockingTlsRootStore::WebPki)
+            .tls_root_store(TlsRootStore::WebPki)
             .build()
         {
             Ok(_) => panic!("native-tls should reject WebPki root store"),

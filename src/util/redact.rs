@@ -1,51 +1,14 @@
-#[cfg(any(test, feature = "async", feature = "blocking"))]
-use http::header::HeaderName;
-
-#[cfg(any(test, feature = "async", feature = "blocking"))]
-use crate::error::Error;
-
 pub(crate) fn redact_value(value: &str) -> String {
     let value = value.trim();
-    if value.is_empty() {
+    if value.chars().nth(12).is_none() {
         return "<redacted>".to_string();
     }
 
-    let chars = value.chars().collect::<Vec<_>>();
-    if chars.len() <= 12 {
-        return "<redacted>".to_string();
-    }
-
-    let head = chars.iter().take(2).collect::<String>();
-    let tail = chars
-        .iter()
-        .rev()
-        .take(2)
-        .copied()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-
+    let head_end = value.char_indices().nth(2).unwrap().0;
+    let tail_start = value.char_indices().rev().nth(1).unwrap().0;
+    let head = &value[..head_end];
+    let tail = &value[tail_start..];
     format!("{head}...{tail}")
-}
-
-#[cfg(any(test, feature = "async", feature = "blocking"))]
-pub(crate) fn metadata_header_name(value: &str) -> Result<HeaderName, Error> {
-    if value.is_empty() {
-        return Err(Error::invalid_config("metadata key must not be empty"));
-    }
-    if value.trim() != value {
-        return Err(Error::invalid_config(
-            "metadata key must not include leading or trailing whitespace",
-        ));
-    }
-
-    let mut name = String::with_capacity("x-amz-meta-".len() + value.len());
-    name.push_str("x-amz-meta-");
-    name.push_str(&value.to_ascii_lowercase());
-
-    HeaderName::from_bytes(name.as_bytes())
-        .map_err(|_| Error::invalid_config("invalid metadata key for x-amz-meta-* header"))
 }
 
 #[cfg(test)]
@@ -60,15 +23,7 @@ mod tests {
         assert_eq!(redact_value("123456789"), "<redacted>");
         assert_eq!(redact_value("123456789012"), "<redacted>");
         assert_eq!(redact_value("1234567890123"), "12...23");
-    }
-
-    #[test]
-    fn builds_metadata_header_name() {
-        let name = metadata_header_name("Foo").unwrap();
-        assert_eq!(name.as_str(), "x-amz-meta-foo");
-
-        assert!(metadata_header_name("").is_err());
-        assert!(metadata_header_name(" Foo ").is_err());
-        assert!(metadata_header_name("a b").is_err());
+        assert_eq!(redact_value("一二三四五六七八九十甲乙"), "<redacted>");
+        assert_eq!(redact_value(" 一二三四五六七八九十甲乙丙 "), "一二...乙丙");
     }
 }

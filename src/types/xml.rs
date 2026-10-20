@@ -1,7 +1,5 @@
 use serde::Deserialize;
 
-use crate::error::{Error, Result};
-
 use super::*;
 
 #[derive(Debug, Deserialize)]
@@ -25,7 +23,7 @@ pub(crate) struct XmlListBucketResult {
     #[serde(rename = "Delimiter")]
     pub(crate) delimiter: Option<String>,
     #[serde(rename = "IsTruncated")]
-    pub(crate) is_truncated: Option<bool>,
+    pub(crate) is_truncated: bool,
     #[serde(rename = "KeyCount")]
     pub(crate) key_count: Option<u32>,
     #[serde(rename = "MaxKeys")]
@@ -134,7 +132,7 @@ pub(crate) struct XmlListPartsResult {
     #[serde(rename = "UploadId")]
     pub(crate) upload_id: Option<String>,
     #[serde(rename = "IsTruncated")]
-    pub(crate) is_truncated: Option<bool>,
+    pub(crate) is_truncated: bool,
     #[serde(rename = "PartNumberMarker")]
     pub(crate) part_number_marker: Option<u32>,
     #[serde(rename = "NextPartNumberMarker")]
@@ -172,7 +170,7 @@ pub(crate) struct XmlListAllMyBucketsResult {
     #[serde(rename = "Owner")]
     pub(crate) owner: Option<XmlOwner>,
     #[serde(rename = "Buckets")]
-    pub(crate) buckets: Option<XmlBuckets>,
+    pub(crate) buckets: XmlBuckets,
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,7 +262,7 @@ pub(crate) struct XmlCorsRule {
 #[derive(Debug, Deserialize)]
 pub(crate) struct XmlTagging {
     #[serde(rename = "TagSet")]
-    pub(crate) tag_set: Option<XmlTagSet>,
+    pub(crate) tag_set: XmlTagSet,
 }
 
 #[derive(Debug, Deserialize)]
@@ -315,15 +313,13 @@ pub(crate) struct XmlPublicAccessBlockConfiguration {
     pub(crate) restrict_public_buckets: Option<bool>,
 }
 
-impl TryFrom<XmlListBucketResult> for ListObjectsV2Output {
-    type Error = Error;
-
-    fn try_from(value: XmlListBucketResult) -> Result<Self> {
-        Ok(Self {
+impl From<XmlListBucketResult> for ListObjectsV2Output {
+    fn from(value: XmlListBucketResult) -> Self {
+        Self {
             name: value.name,
             prefix: value.prefix,
             delimiter: value.delimiter,
-            is_truncated: value.is_truncated.unwrap_or(false),
+            is_truncated: value.is_truncated,
             key_count: value.key_count,
             max_keys: value.max_keys,
             continuation_token: value.continuation_token,
@@ -344,7 +340,7 @@ impl TryFrom<XmlListBucketResult> for ListObjectsV2Output {
                 .into_iter()
                 .map(|p| p.prefix)
                 .collect(),
-        })
+        }
     }
 }
 
@@ -352,16 +348,13 @@ impl From<XmlListAllMyBucketsResult> for ListBucketsOutput {
     fn from(value: XmlListAllMyBucketsResult) -> Self {
         let buckets = value
             .buckets
-            .map(|b| {
-                b.buckets
-                    .into_iter()
-                    .map(|bucket| Bucket {
-                        name: bucket.name,
-                        creation_date: bucket.creation_date,
-                    })
-                    .collect()
+            .buckets
+            .into_iter()
+            .map(|bucket| Bucket {
+                name: bucket.name,
+                creation_date: bucket.creation_date,
             })
-            .unwrap_or_default();
+            .collect();
 
         Self {
             owner: value.owner.map(|o| BucketOwner {
@@ -439,7 +432,7 @@ impl From<XmlListPartsResult> for ListPartsOutput {
             bucket: value.bucket,
             key: value.key,
             upload_id: value.upload_id,
-            is_truncated: value.is_truncated.unwrap_or(false),
+            is_truncated: value.is_truncated,
             part_number_marker: value.part_number_marker,
             next_part_number_marker: value.next_part_number_marker,
             max_parts: value.max_parts,

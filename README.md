@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/s3.svg)](https://crates.io/crates/s3)
 [![docs.rs](https://docs.rs/s3/badge.svg)](https://docs.rs/s3)
-[![CI](https://github.com/lvillis/s3-rs/actions/workflows/ci.yaml/badge.svg)](https://github.com/lvillis/s3-rs/actions/workflows/ci.yaml)
+[![CI](https://github.com/oksyd/s3-rs/actions/workflows/ci.yaml/badge.svg)](https://github.com/oksyd/s3-rs/actions/workflows/ci.yaml)
 
 Lean, modern, unofficial S3-compatible client for Rust.
 
@@ -88,14 +88,14 @@ fn demo() -> Result<(), s3::Error> {
 ```rust,no_run
 use std::time::Duration;
 
-use s3::{AddressingStyle, AsyncTlsRootStore, Auth, Client};
+use s3::{AddressingStyle, Auth, Client, TlsRootStore};
 
 # async fn demo() -> Result<(), s3::Error> {
 let client = Client::builder("https://s3.example.com")?
     .region("us-east-1")
     .auth(Auth::from_env()?)
     .addressing_style(AddressingStyle::Auto)
-    .tls_root_store(AsyncTlsRootStore::BackendDefault)
+    .tls_root_store(TlsRootStore::BackendDefault)
     .timeout(Duration::from_secs(30))
     .max_attempts(3)
     .build()?;
@@ -174,8 +174,9 @@ providers, and optional cloud credential flows all feed the same client builder 
 - `Auth::from_imds_with_tls_root_store(...)` / `Auth::from_web_identity_env_with_tls_root_store(...)`: explicit TLS root policy for credentials fetch
 - Optional features:
   - `credentials-profile`: shared config/profile loader
-  - `credentials-imds`: IMDS credentials (async/blocking APIs)
-  - `credentials-sts`: web identity / STS flows
+  - `credentials-imds`: container metadata or IMDSv2 credentials (async/blocking APIs)
+  - `credentials-sts`: web identity / STS flows using regional endpoints; web identity requires
+    `AWS_REGION` or `AWS_DEFAULT_REGION`
 
 ## Compatibility
 
@@ -221,7 +222,3 @@ through `objects()` or `buckets()`.
 - Blocking presign: `examples/blocking_presign_get.rs`
 
 See `examples/README.md` for environment variables and feature requirements.
-
-## Development
-
-Run `just ci` after local changes to validate formatting, feature combinations, tests, and clippy.

@@ -5,7 +5,6 @@ use std::env;
 use s3::{Auth, Client};
 
 #[cfg(feature = "async")]
-#[allow(clippy::result_large_err)]
 #[tokio::main]
 async fn main() -> Result<(), s3::Error> {
     let endpoint = match env::var("S3_TEST_ENDPOINT") {

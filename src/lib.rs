@@ -71,7 +71,7 @@
 //! - Download an object: [`api::GetObjectRequest`]
 //! - Upload an object: [`api::PutObjectRequest`]
 //! - List objects: [`api::ListObjectsV2Request`]
-//! - Presign a request: [`api::PresignGetObjectRequest`] or [`types::PresignedRequest`]
+//! - Presign a request: [`api::PresignObjectRequest`] or [`types::PresignedRequest`]
 //! - List buckets: [`api::ListBucketsRequest`]
 //! - Manage bucket settings: [`api::PutBucketLifecycleRequest`], [`api::PutBucketCorsRequest`],
 //!   [`api::PutBucketTaggingRequest`], [`api::PutBucketEncryptionRequest`]
@@ -88,7 +88,6 @@
 //! builders, object and bucket services, TLS policy, and blocking variants.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
-#![allow(clippy::result_large_err)]
 
 #[cfg(all(
     feature = "rustls",
@@ -123,18 +122,22 @@ mod auth;
 mod client;
 mod credentials;
 mod error;
+mod tls;
 #[cfg(any(test, feature = "async", feature = "blocking"))]
 mod transport;
 mod util;
 
 #[cfg(any(feature = "async", feature = "blocking"))]
 pub use auth::CachedProvider;
+#[cfg(feature = "async")]
+pub use auth::CredentialsFuture;
 pub use auth::{
     AddressingStyle, Auth, Credentials, CredentialsProvider, CredentialsSnapshot,
-    CredentialsTlsRootStore, DynCredentialsProvider, Region,
+    DynCredentialsProvider, Region,
 };
-#[cfg(feature = "async")]
-pub use client::{AsyncTlsRootStore, Client, ClientBuilder};
 #[cfg(feature = "blocking")]
-pub use client::{BlockingClient, BlockingClientBuilder, BlockingTlsRootStore};
-pub use error::{Error, Result};
+pub use client::{BlockingClient, BlockingClientBuilder};
+#[cfg(feature = "async")]
+pub use client::{Client, ClientBuilder};
+pub use error::{ApiError, Error, Result};
+pub use tls::TlsRootStore;

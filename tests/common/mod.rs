@@ -170,10 +170,7 @@ async fn cleanup_bucket_async(client: &s3::Client, bucket: &str) -> Result<(), E
 
     match client.buckets().delete(bucket).send().await {
         Ok(_) => Ok(()),
-        Err(Error::Api {
-            status: StatusCode::NOT_FOUND,
-            ..
-        }) => Ok(()),
+        Err(err) if err.status() == Some(StatusCode::NOT_FOUND) => Ok(()),
         Err(err) if is_bucket_not_empty(&err) => {
             delete_all_objects_async(client, bucket).await?;
             client.buckets().delete(bucket).send().await?;
@@ -202,13 +199,7 @@ async fn delete_all_objects_async(client: &s3::Client, bucket: &str) -> Result<(
             .send()
             .await
         {
-            if matches!(
-                err,
-                Error::Api {
-                    status: StatusCode::NOT_FOUND,
-                    ..
-                }
-            ) {
+            if err.status() == Some(StatusCode::NOT_FOUND) {
                 break;
             }
             return Err(err);
@@ -255,10 +246,7 @@ fn cleanup_bucket_blocking(client: &s3::BlockingClient, bucket: &str) -> Result<
 
     match client.buckets().delete(bucket).send() {
         Ok(_) => Ok(()),
-        Err(Error::Api {
-            status: StatusCode::NOT_FOUND,
-            ..
-        }) => Ok(()),
+        Err(err) if err.status() == Some(StatusCode::NOT_FOUND) => Ok(()),
         Err(err) if is_bucket_not_empty(&err) => {
             delete_all_objects_blocking(client, bucket)?;
             client.buckets().delete(bucket).send()?;
@@ -288,10 +276,7 @@ fn delete_all_objects_blocking(client: &s3::BlockingClient, bucket: &str) -> Res
             .send()
         {
             Ok(_) => {}
-            Err(Error::Api {
-                status: StatusCode::NOT_FOUND,
-                ..
-            }) => break,
+            Err(err) if err.status() == Some(StatusCode::NOT_FOUND) => break,
             Err(err) => return Err(err),
         }
     }
@@ -299,18 +284,11 @@ fn delete_all_objects_blocking(client: &s3::BlockingClient, bucket: &str) -> Res
 }
 
 fn is_bucket_not_empty(err: &Error) -> bool {
-    use http::StatusCode;
-
-    match err {
-        Error::Api { status, code, .. } => {
-            *status == StatusCode::CONFLICT
-                && matches!(
-                    code.as_deref(),
-                    None | Some("BucketNotEmpty") | Some("BucketNotEmptyError")
-                )
-        }
-        _ => false,
-    }
+    err.status() == Some(http::StatusCode::CONFLICT)
+        && matches!(
+            err.code(),
+            None | Some("BucketNotEmpty") | Some("BucketNotEmptyError")
+        )
 }
 
 pub(crate) fn is_unsupported(err: &Error) -> bool {
@@ -319,10 +297,5 @@ pub(crate) fn is_unsupported(err: &Error) -> bool {
     };
 
     // S3-compatible servers may return 501 for APIs they don't implement.
-    status.as_u16() == 501
-        || matches!(
-            err,
-            Error::Api { code: Some(code), .. }
-                if matches!(code.as_str(), "NotImplemented" | "UnsupportedOperation")
-        )
+    status.as_u16() == 501 || matches!(err.code(), Some("NotImplemented" | "UnsupportedOperation"))
 }

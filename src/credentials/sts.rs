@@ -1,3 +1,4 @@
+use super::parse_expiration;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 #[cfg(any(feature = "async", feature = "blocking"))]
@@ -5,7 +6,6 @@ use reqx::{
     advanced::TlsRootStore,
     prelude::{RedirectPolicy, RetryPolicy, StatusPolicy},
 };
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     auth::{AddressingStyle, Credentials, CredentialsSnapshot, Region},
@@ -13,79 +13,65 @@ use crate::{
 };
 
 const SERVICE: &str = "sts";
-const STS_GLOBAL_ENDPOINT: &str = "https://sts.amazonaws.com";
 
 #[cfg(feature = "async")]
 pub(crate) async fn assume_role_async(
-    region: Region,
-    role_arn: String,
-    role_session_name: String,
-    source_credentials: Credentials,
+    region: &Region,
+    role_arn: &str,
+    role_session_name: &str,
+    source_credentials: &Credentials,
     tls_root_store: TlsRootStore,
 ) -> Result<CredentialsSnapshot, Error> {
     use std::time::Duration;
 
-    validate_assume_role_inputs(&role_arn, &role_session_name)?;
-
-    let endpoint = sts_regional_endpoint(&region)?;
-    let body = form_body(&[
-        ("Action", "AssumeRole"),
-        ("Version", "2011-06-15"),
-        ("RoleArn", &role_arn),
-        ("RoleSessionName", &role_session_name),
-    ]);
-
-    let body_bytes = Bytes::from(body);
-    let payload_hash = crate::util::signing::payload_hash_bytes(&body_bytes);
-
-    let resolved =
-        crate::util::url::resolve_url(&endpoint, None, None, &[], AddressingStyle::Path)?;
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/x-www-form-urlencoded"),
-    );
-
-    let now = time::OffsetDateTime::now_utc();
-    crate::util::signing::sign_headers_with_service(
-        &Method::POST,
-        &resolved,
-        &mut headers,
-        &payload_hash,
-        crate::util::signing::SigV4Params::new(&region, SERVICE, &source_credentials, now),
-    )?;
+    let (url, headers, body) =
+        assume_role_request(region, role_arn, role_session_name, source_credentials)?;
 
     let client = sts_async_client(Duration::from_secs(10), tls_root_store)?;
-    let (status, headers, body) =
-        send_form_async(&client, resolved.url.as_str(), headers, body_bytes).await?;
-    let text = sts_response_text(status, &headers, &body)?;
+    let resp = send_form_async(&client, url.into(), headers, body).await?;
+    let text = sts_response_text(resp.status(), resp.headers(), resp.body())?;
 
-    parse_assume_role_response(&text)
+    parse_assume_role_response(text)
 }
 
 #[cfg(feature = "blocking")]
 pub(crate) fn assume_role_blocking(
-    region: Region,
-    role_arn: String,
-    role_session_name: String,
-    source_credentials: Credentials,
+    region: &Region,
+    role_arn: &str,
+    role_session_name: &str,
+    source_credentials: &Credentials,
     tls_root_store: TlsRootStore,
 ) -> Result<CredentialsSnapshot, Error> {
     use std::time::Duration;
 
-    validate_assume_role_inputs(&role_arn, &role_session_name)?;
+    let (url, headers, body) =
+        assume_role_request(region, role_arn, role_session_name, source_credentials)?;
 
-    let endpoint = sts_regional_endpoint(&region)?;
+    let client = sts_blocking_client(Duration::from_secs(10), tls_root_store)?;
+    let resp = send_form_blocking(&client, url.into(), headers, body)?;
+    let text = sts_response_text(resp.status(), resp.headers(), resp.body())?;
+
+    parse_assume_role_response(text)
+}
+
+fn assume_role_request(
+    region: &Region,
+    role_arn: &str,
+    role_session_name: &str,
+    source_credentials: &Credentials,
+) -> Result<(url::Url, HeaderMap, Bytes), Error> {
+    validate_assume_role_inputs(role_arn, role_session_name)?;
+
+    let endpoint = sts_regional_endpoint(region.as_str(), None)?;
     let body = form_body(&[
         ("Action", "AssumeRole"),
         ("Version", "2011-06-15"),
-        ("RoleArn", &role_arn),
-        ("RoleSessionName", &role_session_name),
+        ("RoleArn", role_arn),
+        ("RoleSessionName", role_session_name),
     ]);
 
     let body_bytes = Bytes::from(body);
-    let payload_hash = crate::util::signing::payload_hash_bytes(&body_bytes);
+    let payload_hash = crate::util::signing::sha256_hex(&body_bytes);
 
     let resolved =
         crate::util::url::resolve_url(&endpoint, None, None, &[], AddressingStyle::Path)?;
@@ -97,20 +83,15 @@ pub(crate) fn assume_role_blocking(
     );
 
     let now = time::OffsetDateTime::now_utc();
-    crate::util::signing::sign_headers_with_service(
+    crate::util::signing::sign_headers(
         &Method::POST,
         &resolved,
         &mut headers,
         &payload_hash,
-        crate::util::signing::SigV4Params::new(&region, SERVICE, &source_credentials, now),
+        crate::util::signing::SigV4Params::new(region, SERVICE, source_credentials, now),
     )?;
 
-    let client = sts_blocking_client(Duration::from_secs(10), tls_root_store)?;
-    let (status, headers, body) =
-        send_form_blocking(&client, resolved.url.as_str(), headers, body_bytes)?;
-    let text = sts_response_text(status, &headers, &body)?;
-
-    parse_assume_role_response(&text)
+    Ok((resolved.url, headers, body_bytes))
 }
 
 #[cfg(feature = "async")]
@@ -119,6 +100,31 @@ pub(crate) async fn assume_role_with_web_identity_env_async(
 ) -> Result<CredentialsSnapshot, Error> {
     use std::time::Duration;
 
+    let (url, headers, body) = web_identity_request()?;
+
+    let client = sts_async_client(Duration::from_secs(10), tls_root_store)?;
+    let resp = send_form_async(&client, url.into(), headers, body).await?;
+    let text = sts_response_text(resp.status(), resp.headers(), resp.body())?;
+
+    parse_assume_role_with_web_identity_response(text)
+}
+
+#[cfg(feature = "blocking")]
+pub(crate) fn assume_role_with_web_identity_env_blocking(
+    tls_root_store: TlsRootStore,
+) -> Result<CredentialsSnapshot, Error> {
+    use std::time::Duration;
+
+    let (url, headers, body) = web_identity_request()?;
+
+    let client = sts_blocking_client(Duration::from_secs(10), tls_root_store)?;
+    let resp = send_form_blocking(&client, url.into(), headers, body)?;
+    let text = sts_response_text(resp.status(), resp.headers(), resp.body())?;
+
+    parse_assume_role_with_web_identity_response(text)
+}
+
+fn web_identity_request() -> Result<(url::Url, HeaderMap, Bytes), Error> {
     let (role_arn, session_name, token) = web_identity_env()?;
     let endpoint = web_identity_sts_endpoint(&role_arn)?;
 
@@ -137,154 +143,69 @@ pub(crate) async fn assume_role_with_web_identity_env_async(
         HeaderValue::from_static("application/x-www-form-urlencoded"),
     );
 
-    let client = sts_async_client(Duration::from_secs(10), tls_root_store)?;
-    let (status, headers, body) =
-        send_form_async(&client, endpoint.as_str(), headers, body_bytes).await?;
-    let text = sts_response_text(status, &headers, &body)?;
-
-    parse_assume_role_with_web_identity_response(&text)
-}
-
-#[cfg(feature = "blocking")]
-pub(crate) fn assume_role_with_web_identity_env_blocking(
-    tls_root_store: TlsRootStore,
-) -> Result<CredentialsSnapshot, Error> {
-    use std::time::Duration;
-
-    let (role_arn, session_name, token) = web_identity_env()?;
-    let endpoint = web_identity_sts_endpoint(&role_arn)?;
-
-    let body = form_body(&[
-        ("Action", "AssumeRoleWithWebIdentity"),
-        ("Version", "2011-06-15"),
-        ("RoleArn", &role_arn),
-        ("RoleSessionName", &session_name),
-        ("WebIdentityToken", &token),
-    ]);
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/x-www-form-urlencoded"),
-    );
-
-    let client = sts_blocking_client(Duration::from_secs(10), tls_root_store)?;
-    let (status, headers, body) =
-        send_form_blocking(&client, endpoint.as_str(), headers, Bytes::from(body))?;
-    let text = sts_response_text(status, &headers, &body)?;
-
-    parse_assume_role_with_web_identity_response(&text)
+    Ok((endpoint, headers, body_bytes))
 }
 
 #[cfg(feature = "async")]
 async fn send_form_async(
     client: &reqx::Client,
-    url: &str,
+    url: String,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<(StatusCode, HeaderMap, Bytes), Error> {
-    let mut req = client
-        .request(Method::POST, url.to_string())
-        .body(body)
-        .redirect_policy(RedirectPolicy::none())
-        .retry_policy(RetryPolicy::disabled());
+) -> Result<reqx::Response, Error> {
+    let mut req = client.request(Method::POST, url).body(body);
     for (name, value) in headers {
         if let Some(name) = name {
             req = req.header(name, value);
         }
     }
 
-    let resp = req
-        .status_policy(StatusPolicy::Response)
-        .send()
+    req.send()
         .await
-        .map_err(|e| crate::transport::map_reqx_error("request failed", e))?;
-    Ok((resp.status(), resp.headers().clone(), resp.body().clone()))
+        .map_err(|e| crate::transport::map_reqx_error("request failed", e))
 }
 
 #[cfg(feature = "blocking")]
 fn send_form_blocking(
     client: &reqx::blocking::Client,
-    url: &str,
+    url: String,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<(StatusCode, HeaderMap, Bytes), Error> {
-    let mut req = client
-        .request(Method::POST, url.to_string())
-        .body(body)
-        .redirect_policy(RedirectPolicy::none())
-        .retry_policy(RetryPolicy::disabled());
+) -> Result<reqx::Response, Error> {
+    let mut req = client.request(Method::POST, url).body(body);
     for (name, value) in headers {
         if let Some(name) = name {
             req = req.header(name, value);
         }
     }
 
-    let resp = req
-        .status_policy(StatusPolicy::Response)
-        .send()
-        .map_err(|e| crate::transport::map_reqx_error("request failed", e))?;
-    Ok((resp.status(), resp.headers().clone(), resp.body().clone()))
+    req.send()
+        .map_err(|e| crate::transport::map_reqx_error("request failed", e))
 }
 
-fn sts_response_text(
+fn sts_response_text<'a>(
     status: StatusCode,
     headers: &HeaderMap,
-    body: &Bytes,
-) -> Result<String, Error> {
+    body: &'a Bytes,
+) -> Result<&'a str, Error> {
+    let text = crate::util::text::decode_utf8_response_body(body)?;
     if status.is_success() {
-        return crate::util::text::decode_utf8_response_body(body);
+        return Ok(text);
     }
 
-    let text = crate::util::text::decode_utf8_response_body(body)?;
-    Err(sts_api_error(status, headers, &text))
+    Err(crate::transport::response_error_from_status(
+        status, headers, text,
+    ))
 }
 
-fn sts_regional_endpoint(region: &Region) -> Result<url::Url, Error> {
-    sts_regional_endpoint_for_partition(region, None)
-}
-
-fn sts_regional_endpoint_for_partition(
-    region: &Region,
-    partition: Option<&str>,
-) -> Result<url::Url, Error> {
-    let suffix = if matches!(partition, Some("aws-cn")) || region.as_str().starts_with("cn-") {
+fn sts_regional_endpoint(region: &str, partition: Option<&str>) -> Result<url::Url, Error> {
+    let suffix = if matches!(partition, Some("aws-cn")) || region.starts_with("cn-") {
         "amazonaws.com.cn"
     } else {
         "amazonaws.com"
     };
-    let url = format!("https://sts.{}.{suffix}", region.as_str());
+    let url = format!("https://sts.{region}.{suffix}");
     url::Url::parse(&url).map_err(|_| Error::invalid_config("invalid STS endpoint URL"))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StsRegionalEndpointsMode {
-    Legacy,
-    Regional,
-}
-
-impl StsRegionalEndpointsMode {
-    fn parse(value: &str) -> Result<Self, Error> {
-        if value.trim() != value {
-            return Err(Error::invalid_config(
-                "AWS_STS_REGIONAL_ENDPOINTS must not include leading or trailing whitespace",
-            ));
-        }
-        match value.to_ascii_lowercase().as_str() {
-            "legacy" => Ok(Self::Legacy),
-            "regional" => Ok(Self::Regional),
-            _ => Err(Error::invalid_config(
-                "AWS_STS_REGIONAL_ENDPOINTS must be one of: legacy, regional",
-            )),
-        }
-    }
-}
-
-fn sts_regional_endpoints_mode_from_env() -> Result<Option<StsRegionalEndpointsMode>, Error> {
-    crate::util::env::optional_non_empty_var("AWS_STS_REGIONAL_ENDPOINTS")?
-        .as_deref()
-        .map(StsRegionalEndpointsMode::parse)
-        .transpose()
 }
 
 fn web_identity_region_from_env() -> Result<Option<String>, Error> {
@@ -323,34 +244,20 @@ fn partition_from_role_arn(role_arn: &str) -> Option<&str> {
 fn web_identity_sts_endpoint(role_arn: &str) -> Result<url::Url, Error> {
     let partition = partition_from_role_arn(role_arn);
     let region = web_identity_region_from_env()?;
-    let mode = sts_regional_endpoints_mode_from_env()?;
-    resolve_web_identity_sts_endpoint(partition, region.as_deref(), mode)
+    resolve_web_identity_sts_endpoint(partition, region.as_deref())
 }
 
 fn resolve_web_identity_sts_endpoint(
     partition: Option<&str>,
     region: Option<&str>,
-    mode: Option<StsRegionalEndpointsMode>,
 ) -> Result<url::Url, Error> {
-    let requires_regional = matches!(partition, Some("aws-cn" | "aws-us-gov"));
-    let use_regional = requires_regional
-        || matches!(
-            mode.unwrap_or(StsRegionalEndpointsMode::Legacy),
-            StsRegionalEndpointsMode::Regional
-        );
-
-    if use_regional {
-        let region = region.ok_or_else(|| {
-            Error::invalid_config(
-                "AWS_REGION or AWS_DEFAULT_REGION is required for regional STS endpoint",
-            )
-        })?;
-        let region = Region::new(region.to_string())?;
-        return sts_regional_endpoint_for_partition(&region, partition);
-    }
-
-    url::Url::parse(STS_GLOBAL_ENDPOINT)
-        .map_err(|_| Error::invalid_config("invalid STS endpoint URL"))
+    let region = region.ok_or_else(|| {
+        Error::invalid_config(
+            "AWS_REGION or AWS_DEFAULT_REGION is required for regional STS endpoint",
+        )
+    })?;
+    crate::util::validation::validate_region("region", region)?;
+    sts_regional_endpoint(region, partition)
 }
 
 fn web_identity_env() -> Result<(String, String, String), Error> {
@@ -361,14 +268,15 @@ fn web_identity_env() -> Result<(String, String, String), Error> {
 
     validate_assume_role_inputs(&role_arn, &session_name)?;
 
-    let token = std::fs::read_to_string(token_file)
+    let mut token = std::fs::read_to_string(token_file)
         .map_err(|e| Error::invalid_config(format!("failed to read web identity token: {e}")))?;
-    let token = web_identity_token_from_file_contents(&token)?;
+    let token_len = web_identity_token_from_file_contents(&token)?.len();
+    token.truncate(token_len);
 
     Ok((role_arn, session_name, token))
 }
 
-fn web_identity_token_from_file_contents(contents: &str) -> Result<String, Error> {
+fn web_identity_token_from_file_contents(contents: &str) -> Result<&str, Error> {
     let token = crate::util::text::strip_trailing_line_ending(contents);
     if token.is_empty() {
         return Err(Error::invalid_config("web identity token is empty"));
@@ -381,7 +289,7 @@ fn web_identity_token_from_file_contents(contents: &str) -> Result<String, Error
             "web identity token must not contain ASCII control or whitespace characters",
         ));
     }
-    Ok(token.to_string())
+    Ok(token)
 }
 
 fn validate_assume_role_inputs(role_arn: &str, role_session_name: &str) -> Result<(), Error> {
@@ -480,88 +388,51 @@ fn form_body(params: &[(&str, &str)]) -> String {
     out
 }
 
-fn sts_api_error(status: StatusCode, headers: &HeaderMap, body: &str) -> Error {
-    crate::transport::response_error_from_status(status, headers, body)
+#[derive(serde::Deserialize)]
+struct XmlStsResult {
+    #[serde(rename = "Credentials")]
+    credentials: XmlStsCredentials,
 }
 
-fn parse_expiration(value: &str) -> Result<OffsetDateTime, Error> {
-    if value.is_empty() {
-        return Err(Error::decode("missing credentials expiration", None));
+#[derive(serde::Deserialize)]
+struct XmlStsCredentials {
+    #[serde(rename = "AccessKeyId")]
+    access_key_id: String,
+    #[serde(rename = "Expiration")]
+    expiration: String,
+    #[serde(rename = "SecretAccessKey")]
+    secret_access_key: String,
+    #[serde(rename = "SessionToken")]
+    session_token: String,
+}
+
+impl XmlStsCredentials {
+    fn into_snapshot(self) -> Result<CredentialsSnapshot, Error> {
+        let mut creds = Credentials::new(self.access_key_id, self.secret_access_key)?;
+        creds = creds.with_session_token(self.session_token)?;
+        let expires_at = parse_expiration(&self.expiration)?;
+        Ok(CredentialsSnapshot::new(creds).with_expires_at(expires_at))
     }
-    if value.trim() != value {
-        return Err(Error::decode(
-            "credentials expiration timestamp must not include leading or trailing whitespace",
-            None,
-        ));
-    }
-    OffsetDateTime::parse(value, &Rfc3339).map_err(|e| {
-        Error::decode(
-            "failed to parse credentials expiration timestamp",
-            Some(Box::new(e)),
-        )
-    })
 }
 
 fn parse_assume_role_response(body: &str) -> Result<CredentialsSnapshot, Error> {
     #[derive(serde::Deserialize)]
     struct XmlAssumeRoleResponse {
         #[serde(rename = "AssumeRoleResult")]
-        result: XmlAssumeRoleResult,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct XmlAssumeRoleResult {
-        #[serde(rename = "Credentials")]
-        credentials: XmlStsCredentials,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct XmlStsCredentials {
-        #[serde(rename = "AccessKeyId")]
-        access_key_id: String,
-        #[serde(rename = "Expiration")]
-        expiration: String,
-        #[serde(rename = "SecretAccessKey")]
-        secret_access_key: String,
-        #[serde(rename = "SessionToken")]
-        session_token: String,
+        result: XmlStsResult,
     }
 
     let parsed = quick_xml::de::from_str::<XmlAssumeRoleResponse>(body)
         .map_err(|e| Error::decode("failed to parse AssumeRole XML response", Some(Box::new(e))))?;
 
-    let mut creds = Credentials::new(
-        parsed.result.credentials.access_key_id,
-        parsed.result.credentials.secret_access_key,
-    )?;
-    creds = creds.with_session_token(parsed.result.credentials.session_token)?;
-    let expires_at = parse_expiration(&parsed.result.credentials.expiration)?;
-    Ok(CredentialsSnapshot::new(creds).with_expires_at(expires_at))
+    parsed.result.credentials.into_snapshot()
 }
 
 fn parse_assume_role_with_web_identity_response(body: &str) -> Result<CredentialsSnapshot, Error> {
     #[derive(serde::Deserialize)]
     struct XmlResponse {
         #[serde(rename = "AssumeRoleWithWebIdentityResult")]
-        result: XmlResult,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct XmlResult {
-        #[serde(rename = "Credentials")]
-        credentials: XmlStsCredentials,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct XmlStsCredentials {
-        #[serde(rename = "AccessKeyId")]
-        access_key_id: String,
-        #[serde(rename = "Expiration")]
-        expiration: String,
-        #[serde(rename = "SecretAccessKey")]
-        secret_access_key: String,
-        #[serde(rename = "SessionToken")]
-        session_token: String,
+        result: XmlStsResult,
     }
 
     let parsed = quick_xml::de::from_str::<XmlResponse>(body).map_err(|e| {
@@ -571,13 +442,7 @@ fn parse_assume_role_with_web_identity_response(body: &str) -> Result<Credential
         )
     })?;
 
-    let mut creds = Credentials::new(
-        parsed.result.credentials.access_key_id,
-        parsed.result.credentials.secret_access_key,
-    )?;
-    creds = creds.with_session_token(parsed.result.credentials.session_token)?;
-    let expires_at = parse_expiration(&parsed.result.credentials.expiration)?;
-    Ok(CredentialsSnapshot::new(creds).with_expires_at(expires_at))
+    parsed.result.credentials.into_snapshot()
 }
 
 #[cfg(feature = "async")]
@@ -707,70 +572,53 @@ mod tests {
 
     #[test]
     fn builds_regional_endpoint() {
-        let region = Region::new("us-east-1").unwrap();
-        let url = sts_regional_endpoint(&region).unwrap();
+        let url = sts_regional_endpoint("us-east-1", None).unwrap();
         assert_eq!(url.as_str(), "https://sts.us-east-1.amazonaws.com/");
     }
 
     #[test]
     fn builds_regional_endpoint_for_cn_region() {
-        let region = Region::new("cn-north-1").unwrap();
-        let url = sts_regional_endpoint(&region).unwrap();
+        let url = sts_regional_endpoint("cn-north-1", None).unwrap();
         assert_eq!(url.as_str(), "https://sts.cn-north-1.amazonaws.com.cn/");
     }
 
     #[test]
-    fn resolve_web_identity_sts_endpoint_defaults_to_global() {
-        let url = resolve_web_identity_sts_endpoint(None, None, None).unwrap();
-        assert_eq!(url.as_str(), "https://sts.amazonaws.com/");
-    }
-
-    #[test]
-    fn resolve_web_identity_sts_endpoint_uses_regional_when_requested() {
-        let url = resolve_web_identity_sts_endpoint(
-            Some("aws"),
-            Some("eu-west-1"),
-            Some(StsRegionalEndpointsMode::Regional),
-        )
-        .unwrap();
-        assert_eq!(url.as_str(), "https://sts.eu-west-1.amazonaws.com/");
-    }
-
-    #[test]
-    fn resolve_web_identity_sts_endpoint_rejects_region_outer_whitespace() {
-        let err = resolve_web_identity_sts_endpoint(
-            Some("aws"),
-            Some(" eu-west-1"),
-            Some(StsRegionalEndpointsMode::Regional),
-        )
-        .expect_err("region whitespace must be rejected");
-        match err {
-            Error::InvalidConfig { message } => assert!(message.contains("region")),
-            other => panic!("expected invalid config, got {other:?}"),
+    fn web_identity_sts_requires_a_region_in_every_partition() {
+        for partition in [None, Some("aws"), Some("aws-cn"), Some("aws-us-gov")] {
+            let err = resolve_web_identity_sts_endpoint(partition, None)
+                .expect_err("web identity requires an explicit region");
+            assert!(matches!(err, Error::InvalidConfig { message }
+                if message.contains("AWS_REGION or AWS_DEFAULT_REGION")));
         }
     }
 
     #[test]
-    fn resolve_web_identity_sts_endpoint_requires_region_for_cn_partition() {
-        let err = resolve_web_identity_sts_endpoint(Some("aws-cn"), None, None)
-            .expect_err("aws-cn should require a regional endpoint");
-        match err {
-            Error::InvalidConfig { message } => {
-                assert!(message.contains("AWS_REGION or AWS_DEFAULT_REGION"));
-            }
-            other => panic!("expected invalid config, got {other:?}"),
+    fn web_identity_sts_uses_regional_endpoints() {
+        for (partition, region, expected) in [
+            (
+                Some("aws"),
+                "eu-west-1",
+                "https://sts.eu-west-1.amazonaws.com/",
+            ),
+            (
+                Some("aws-cn"),
+                "cn-northwest-1",
+                "https://sts.cn-northwest-1.amazonaws.com.cn/",
+            ),
+            (
+                Some("aws-us-gov"),
+                "us-gov-west-1",
+                "https://sts.us-gov-west-1.amazonaws.com/",
+            ),
+        ] {
+            assert_eq!(
+                resolve_web_identity_sts_endpoint(partition, Some(region))
+                    .unwrap()
+                    .as_str(),
+                expected
+            );
         }
-    }
-
-    #[test]
-    fn resolve_web_identity_sts_endpoint_uses_cn_regional_suffix() {
-        let url = resolve_web_identity_sts_endpoint(
-            Some("aws-cn"),
-            Some("cn-northwest-1"),
-            Some(StsRegionalEndpointsMode::Legacy),
-        )
-        .unwrap();
-        assert_eq!(url.as_str(), "https://sts.cn-northwest-1.amazonaws.com.cn/");
+        assert!(resolve_web_identity_sts_endpoint(Some("aws"), Some(" eu-west-1")).is_err());
     }
 
     #[test]
@@ -780,8 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn sts_mode_and_assume_role_inputs_reject_ambiguous_values() {
-        assert!(StsRegionalEndpointsMode::parse(" regional").is_err());
+    fn assume_role_inputs_reject_ambiguous_values() {
         assert!(validate_assume_role_inputs("arn:aws:iam::123:role/demo", "s3-session").is_ok());
         assert!(validate_assume_role_inputs(" arn:aws:iam::123:role/demo", "s3-session").is_err());
         assert!(
@@ -906,16 +753,19 @@ mod tests {
 </Error>
 "#;
         let headers = HeaderMap::new();
-        let err = sts_api_error(StatusCode::FORBIDDEN, &headers, err_xml);
+        let err =
+            crate::transport::response_error_from_status(StatusCode::FORBIDDEN, &headers, err_xml);
         match err {
-            Error::Api {
-                status,
-                code,
-                message,
-                request_id,
-                host_id,
-                body_snippet,
-            } => {
+            Error::Api(error) => {
+                let crate::ApiError {
+                    status,
+                    code,
+                    message,
+                    request_id,
+                    host_id,
+                    body_snippet,
+                    ..
+                } = *error;
                 assert_eq!(status, StatusCode::FORBIDDEN);
                 assert_eq!(code.as_deref(), Some("AccessDenied"));
                 assert_eq!(message.as_deref(), Some("Access Denied"));
@@ -933,13 +783,19 @@ mod tests {
         headers.insert(http::header::RETRY_AFTER, HeaderValue::from_static("2"));
         headers.insert("x-amz-request-id", HeaderValue::from_static("req-1"));
 
-        let err = sts_api_error(StatusCode::TOO_MANY_REQUESTS, &headers, "slow down");
+        let err = crate::transport::response_error_from_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers,
+            "slow down",
+        );
         match err {
-            Error::RateLimited {
-                retry_after,
-                request_id,
-                ..
-            } => {
+            Error::Api(error) => {
+                assert!(error.is_rate_limited());
+                let crate::ApiError {
+                    retry_after,
+                    request_id,
+                    ..
+                } = *error;
                 assert_eq!(retry_after, Some(Duration::from_secs(2)));
                 assert_eq!(request_id.as_deref(), Some("req-1"));
             }
@@ -1000,15 +856,35 @@ mod tests {
         );
 
         let url = format!("http://{addr}/");
-        let (status, _, body) =
-            send_form_async(&client, &url, headers, Bytes::from("Action=AssumeRole")).await?;
+        let resp = send_form_async(&client, url, headers, Bytes::from("Action=AssumeRole")).await?;
         handle
             .join()
             .map_err(|_| Error::transport("test server thread panicked", None))?;
 
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        let body = String::from_utf8(body.to_vec()).expect("test response body should be UTF-8");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = crate::util::text::decode_utf8_response_body(resp.body()).unwrap();
         assert!(body.contains("Access Denied"));
+        Ok(())
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn send_form_async_does_not_follow_redirects() -> std::result::Result<(), Error> {
+        let (addr, handle) = spawn_test_server(
+            b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        )?;
+        let client = sts_async_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
+        let resp = send_form_async(
+            &client,
+            format!("http://{addr}/"),
+            HeaderMap::new(),
+            Bytes::from_static(b"Action=AssumeRole"),
+        )
+        .await?;
+        handle
+            .join()
+            .map_err(|_| Error::transport("test server thread panicked", None))?;
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
         Ok(())
     }
 
@@ -1051,15 +927,34 @@ mod tests {
         );
 
         let url = format!("http://{addr}/");
-        let (status, _, body) =
-            send_form_blocking(&client, &url, headers, Bytes::from("Action=AssumeRole"))?;
+        let resp = send_form_blocking(&client, url, headers, Bytes::from("Action=AssumeRole"))?;
         handle
             .join()
             .map_err(|_| Error::transport("test server thread panicked", None))?;
 
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        let body = String::from_utf8(body.to_vec()).expect("test response body should be UTF-8");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = crate::util::text::decode_utf8_response_body(resp.body()).unwrap();
         assert!(body.contains("Access Denied"));
+        Ok(())
+    }
+
+    #[cfg(feature = "blocking")]
+    #[test]
+    fn send_form_blocking_does_not_follow_redirects() -> std::result::Result<(), Error> {
+        let (addr, handle) = spawn_test_server(
+            b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        )?;
+        let client = sts_blocking_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
+        let resp = send_form_blocking(
+            &client,
+            format!("http://{addr}/"),
+            HeaderMap::new(),
+            Bytes::from_static(b"Action=AssumeRole"),
+        )?;
+        handle
+            .join()
+            .map_err(|_| Error::transport("test server thread panicked", None))?;
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
         Ok(())
     }
 

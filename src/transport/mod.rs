@@ -20,17 +20,17 @@ pub(crate) mod blocking_transport;
 use http::HeaderMap;
 #[cfg(any(feature = "async", feature = "blocking"))]
 use http::Method;
-#[cfg(any(test, feature = "async", feature = "blocking"))]
+#[cfg(all(
+    any(test, feature = "metrics"),
+    any(feature = "async", feature = "blocking")
+))]
 use http::StatusCode;
+#[cfg(any(feature = "async", feature = "blocking"))]
+use reqx::advanced::TlsBackend;
 #[cfg(all(feature = "metrics", any(feature = "async", feature = "blocking")))]
 use reqx::{
     Error as ReqxError, ErrorCode as ReqxErrorCode,
-    advanced::{Interceptor, Observer, RequestContext, RetryDecision},
-};
-#[cfg(any(feature = "async", feature = "blocking"))]
-use reqx::{
-    advanced::{BackoffSource, TlsBackend},
-    prelude::RetryPolicy,
+    advanced::{Interceptor, Observer, RequestContext},
 };
 #[cfg(any(feature = "tracing", feature = "async", feature = "blocking"))]
 use url::Url;
@@ -73,62 +73,41 @@ impl RetryConfig {
 
 #[cfg(any(feature = "async", feature = "blocking"))]
 pub(crate) const MAX_BUFFERED_RESPONSE_BODY_BYTES: usize = 32 * 1024 * 1024;
+#[cfg(any(feature = "async", feature = "blocking"))]
+pub(crate) const MAX_ERROR_RESPONSE_BODY_BYTES: usize = 256 * 1024;
 
 #[cfg(any(feature = "async", feature = "blocking"))]
-pub(crate) trait TransportRequestBody: Sized {
-    fn is_empty(&self) -> bool;
-    fn is_replayable(&self) -> bool;
-    fn clone_for_retry(&self) -> Option<Self>;
+pub(crate) enum RequestBody<S> {
+    Empty,
+    Bytes(bytes::Bytes),
+    Stream {
+        stream: S,
+        content_length: Option<u64>,
+    },
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
-pub(crate) struct RequestAttemptState<B> {
-    max_attempts: u32,
-    initial_body: Option<B>,
-    replayable_body: Option<B>,
-}
+impl<S> RequestBody<S> {
+    fn is_replayable(&self) -> bool {
+        !matches!(self, Self::Stream { .. })
+    }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
-impl<B> RequestAttemptState<B>
-where
-    B: TransportRequestBody,
-{
-    pub(crate) fn new(retry: RetryConfig, body: B) -> Self {
-        let max_attempts = if body.is_replayable() {
-            retry.max_attempts
-        } else {
-            1
-        };
-
-        Self {
-            max_attempts,
-            replayable_body: body.clone_for_retry(),
-            initial_body: Some(body),
+    fn take_for_attempt(&mut self) -> Self {
+        match self {
+            Self::Bytes(bytes) => Self::Bytes(bytes.clone()),
+            _ => std::mem::replace(self, Self::Empty),
         }
     }
-
-    pub(crate) fn max_attempts(&self) -> u32 {
-        self.max_attempts
-    }
-
-    pub(crate) fn next_body(&mut self) -> crate::error::Result<B> {
-        if let Some(body) = self.initial_body.take() {
-            return Ok(body);
-        }
-
-        self.replayable_body
-            .as_ref()
-            .and_then(TransportRequestBody::clone_for_retry)
-            .ok_or_else(|| crate::error::Error::transport("request body is not replayable", None))
-    }
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
-pub(crate) fn ensure_method_accepts_body<B>(method: &Method, body: &B) -> crate::error::Result<()>
-where
-    B: TransportRequestBody,
-{
-    if matches!(*method, Method::GET | Method::HEAD | Method::DELETE) && !body.is_empty() {
+pub(crate) fn ensure_method_accepts_body<S>(
+    method: &Method,
+    body: &RequestBody<S>,
+) -> crate::error::Result<()> {
+    if matches!(*method, Method::GET | Method::HEAD | Method::DELETE)
+        && !matches!(body, RequestBody::Empty)
+    {
         return Err(crate::error::Error::invalid_config(
             "this operation does not accept a request body",
         ));
@@ -157,24 +136,6 @@ pub(crate) fn prepare_user_agent(
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
-pub(crate) fn content_length_header_value(
-    content_length: u64,
-) -> crate::error::Result<http::HeaderValue> {
-    http::HeaderValue::from_str(&content_length.to_string())
-        .map_err(|_| crate::error::Error::invalid_config("invalid Content-Length header"))
-}
-
-#[cfg(any(feature = "async", feature = "blocking"))]
-pub(crate) fn content_length_header_value_from_len(
-    content_length: usize,
-) -> crate::error::Result<http::HeaderValue> {
-    let content_length = u64::try_from(content_length).map_err(|_| {
-        crate::error::Error::invalid_config("Content-Length exceeds supported range")
-    })?;
-    content_length_header_value(content_length)
-}
-
-#[cfg(any(feature = "async", feature = "blocking"))]
 pub(crate) fn validate_request_timeout(timeout: Option<Duration>) -> crate::error::Result<()> {
     if timeout.is_some_and(|timeout| timeout.is_zero()) {
         return Err(crate::error::Error::invalid_config("timeout must be > 0"));
@@ -193,40 +154,6 @@ pub(crate) fn backoff_delay(config: RetryConfig, attempt: u32) -> Duration {
 
     let jitter = jitter_millis(capped);
     Duration::from_millis(jitter as u64)
-}
-
-#[cfg(any(feature = "async", feature = "blocking"))]
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ReqxBackoffSource {
-    config: RetryConfig,
-}
-
-#[cfg(any(feature = "async", feature = "blocking"))]
-impl BackoffSource for ReqxBackoffSource {
-    fn backoff_for_retry(&self, _retry_policy: &RetryPolicy, attempt: usize) -> Duration {
-        backoff_delay(self.config, attempt as u32)
-    }
-}
-
-#[cfg(any(feature = "async", feature = "blocking"))]
-pub(crate) fn reqx_backoff_source(config: RetryConfig) -> ReqxBackoffSource {
-    ReqxBackoffSource { config }
-}
-
-#[cfg(any(feature = "async", feature = "blocking"))]
-pub(crate) fn reqx_retry_policy(config: RetryConfig) -> RetryPolicy {
-    let base_backoff = if config.base_delay.is_zero() {
-        Duration::from_millis(1)
-    } else {
-        config.base_delay
-    };
-    let max_backoff = config.max_delay.max(base_backoff);
-
-    RetryPolicy::standard()
-        .max_attempts(config.max_attempts as usize)
-        .base_backoff(base_backoff)
-        .max_backoff(max_backoff)
-        .retryable_status_codes([])
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
@@ -253,20 +180,6 @@ impl Observer for TransportMetricsObserver {
         metrics::counter!("s3_http_attempts_total", "method" => method_label(context.method()))
             .increment(1);
     }
-
-    fn on_retry_scheduled(
-        &self,
-        context: &RequestContext,
-        decision: &RetryDecision,
-        _delay: Duration,
-    ) {
-        metrics::counter!(
-            "s3_http_retries_total",
-            "method" => method_label(context.method()),
-            "reason" => retry_reason_label(decision),
-        )
-        .increment(1);
-    }
 }
 
 #[cfg(all(feature = "metrics", any(feature = "async", feature = "blocking")))]
@@ -291,20 +204,6 @@ impl Interceptor for TransportMetricsInterceptor {
             "kind" => reqx_error_kind_label(error),
         )
         .increment(1);
-    }
-}
-
-#[cfg(all(feature = "metrics", any(feature = "async", feature = "blocking")))]
-fn retry_reason_label(decision: &RetryDecision) -> &'static str {
-    if decision.status().is_some() {
-        "status"
-    } else if decision.transport_error_kind().is_some()
-        || decision.timeout_phase().is_some()
-        || decision.is_response_body_read_error()
-    {
-        "transport"
-    } else {
-        "other"
     }
 }
 
@@ -411,21 +310,6 @@ pub(crate) fn clamp_retry_after(config: RetryConfig, retry_after: Duration) -> D
 }
 
 #[cfg(any(test, feature = "async", feature = "blocking"))]
-pub(crate) fn retry_delay_from_response(
-    config: RetryConfig,
-    attempt: u32,
-    status: StatusCode,
-    headers: &http::HeaderMap,
-) -> Duration {
-    if (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
-        && let Some(retry_after) = retry_after_from_headers(headers)
-    {
-        return clamp_retry_after(config, retry_after);
-    }
-    backoff_delay(config, attempt)
-}
-
-#[cfg(any(test, feature = "async", feature = "blocking"))]
 fn parse_retry_after_value(value: &str) -> Option<Duration> {
     let value = value.trim();
     if value.is_empty() {
@@ -448,58 +332,62 @@ fn parse_retry_after_value(value: &str) -> Option<Duration> {
 pub(crate) struct RequestTimer {
     #[cfg(feature = "metrics")]
     start: std::time::Instant,
+    #[cfg(feature = "metrics")]
+    method: &'static str,
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
 impl RequestTimer {
-    pub(crate) fn start() -> Self {
+    pub(crate) fn start(method: &Method) -> Self {
+        #[cfg(not(feature = "metrics"))]
+        let _ = method;
         Self {
             #[cfg(feature = "metrics")]
             start: std::time::Instant::now(),
+            #[cfg(feature = "metrics")]
+            method: method_label(method),
         }
-    }
-
-    pub(crate) fn finish(&self, method: &Method) {
-        #[cfg(feature = "metrics")]
-        metrics::histogram!(
-            "s3_http_request_duration_seconds",
-            "method" => method_label(method),
-        )
-        .record(self.start.elapsed().as_secs_f64());
-
-        #[cfg(not(feature = "metrics"))]
-        let _ = method;
-    }
-
-    pub(crate) fn finish_service_error(&self, method: &Method) {
-        #[cfg(feature = "metrics")]
-        {
-            metrics::counter!(
-                "s3_http_errors_total",
-                "method" => method_label(method),
-                "kind" => "service"
-            )
-            .increment(1);
-            self.finish(method);
-        }
-
-        #[cfg(not(feature = "metrics"))]
-        let _ = method;
     }
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
-pub(crate) fn record_service_retry(method: &Method) {
+impl Drop for RequestTimer {
+    fn drop(&mut self) {
+        #[cfg(feature = "metrics")]
+        metrics::histogram!(
+            "s3_http_request_duration_seconds",
+            "method" => self.method,
+        )
+        .record(self.start.elapsed().as_secs_f64());
+    }
+}
+
+#[cfg(any(feature = "async", feature = "blocking"))]
+pub(crate) fn record_service_error(method: &Method) {
     #[cfg(feature = "metrics")]
     metrics::counter!(
-        "s3_http_retries_total",
+        "s3_http_errors_total",
         "method" => method_label(method),
-        "reason" => "service"
+        "kind" => "service"
     )
     .increment(1);
 
     #[cfg(not(feature = "metrics"))]
     let _ = method;
+}
+
+#[cfg(any(feature = "async", feature = "blocking"))]
+pub(crate) fn record_retry(method: &Method, reason: &'static str) {
+    #[cfg(feature = "metrics")]
+    metrics::counter!(
+        "s3_http_retries_total",
+        "method" => method_label(method),
+        "reason" => reason
+    )
+    .increment(1);
+
+    #[cfg(not(feature = "metrics"))]
+    let _ = (method, reason);
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
@@ -512,8 +400,13 @@ pub(crate) fn response_error_from_status(
         status,
         headers,
         crate::util::xml::parse_error_xml(body),
-        body,
+        Some(body),
     )
+}
+
+#[cfg(any(feature = "async", feature = "blocking"))]
+pub(crate) fn response_error(resp: reqx::Response) -> crate::error::Error {
+    response_error_from_body(resp.status(), resp.headers(), resp.body())
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
@@ -522,9 +415,9 @@ pub(crate) fn response_error_from_body(
     headers: &http::HeaderMap,
     body: &[u8],
 ) -> crate::error::Error {
-    match crate::util::text::decode_utf8_response_body(body) {
-        Ok(body) => response_error_from_status(status, headers, &body),
-        Err(err) => err,
+    match std::str::from_utf8(body) {
+        Ok(body) => response_error_from_status(status, headers, body),
+        Err(_) => response_error_from_parts(status, headers, None, None),
     }
 }
 
@@ -533,17 +426,11 @@ fn response_error_from_parts(
     status: http::StatusCode,
     headers: &http::HeaderMap,
     parsed: Option<crate::types::xml::XmlError>,
-    body: &str,
+    body: Option<&str>,
 ) -> crate::error::Error {
     let request_id = request_id_from_headers(headers);
     let header_host_id = host_id_from_headers(headers);
-    let snippet = crate::util::text::truncate_snippet(body, 4096);
-    let is_rate_limited = status == http::StatusCode::TOO_MANY_REQUESTS
-        || parsed
-            .as_ref()
-            .and_then(|parsed| parsed.code.as_deref())
-            .is_some_and(crate::error::is_rate_limited_service_error_code);
-
+    let snippet = body.map(|body| crate::util::text::truncate_snippet(body, 4096));
     let (code, message, parsed_request_id, parsed_host_id) = match parsed {
         Some(parsed) => (
             parsed.code,
@@ -554,26 +441,15 @@ fn response_error_from_parts(
         None => (None, None, None, None),
     };
 
-    if is_rate_limited {
-        return crate::error::Error::RateLimited {
-            status,
-            retry_after: retry_after_from_headers(headers),
-            request_id: parsed_request_id.or(request_id),
-            code,
-            message,
-            host_id: parsed_host_id.or(header_host_id),
-            body_snippet: Some(snippet),
-        };
-    }
-
-    crate::error::Error::Api {
+    crate::error::Error::Api(Box::new(crate::error::ApiError {
         status,
+        retry_after: retry_after_from_headers(headers),
         code,
         message,
         request_id: parsed_request_id.or(request_id),
         host_id: parsed_host_id.or(header_host_id),
-        body_snippet: Some(snippet),
-    }
+        body_snippet: snippet,
+    }))
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
@@ -583,51 +459,72 @@ pub(crate) fn response_service_error(
     body: &str,
 ) -> Option<crate::error::Error> {
     crate::util::xml::parse_error_xml(body)
-        .map(|parsed| response_error_from_parts(status, headers, Some(parsed), body))
+        .map(|parsed| response_error_from_parts(status, headers, Some(parsed), Some(body)))
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
-pub(crate) enum ServiceErrorAction {
-    RetryAfter(Duration),
-    ReturnErr(crate::error::Error),
+pub(crate) fn response_error_if_any(resp: &reqx::Response) -> Option<crate::Error> {
+    if resp.status().is_success() {
+        response_service_error(
+            resp.status(),
+            resp.headers(),
+            std::str::from_utf8(resp.body()).ok()?,
+        )
+    } else {
+        Some(response_error_from_body(
+            resp.status(),
+            resp.headers(),
+            resp.body(),
+        ))
+    }
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
-pub(crate) fn service_error_action(
+pub(crate) fn transport_retry_delay(
     retry: RetryConfig,
     attempt: u32,
     max_attempts: u32,
     method: &Method,
-    status: http::StatusCode,
-    headers: &http::HeaderMap,
-    body: &[u8],
-) -> Option<ServiceErrorAction> {
-    if let Ok(body) = std::str::from_utf8(body)
-        && let Some(err) = response_service_error(status, headers, body)
-    {
-        if attempt < max_attempts && err.is_retryable() {
-            return Some(ServiceErrorAction::RetryAfter(retry_delay_from_response(
-                retry, attempt, status, headers,
-            )));
-        }
+    error: &reqx::Error,
+) -> Option<Duration> {
+    use reqx::TransportErrorKind;
 
-        if status.is_success() {
-            return Some(ServiceErrorAction::ReturnErr(err));
-        }
-
+    if attempt >= max_attempts || !method_allows_status_retry(method) {
         return None;
     }
 
-    if attempt < max_attempts
-        && method_allows_status_retry(method)
-        && is_retryable_http_status(status)
-    {
-        return Some(ServiceErrorAction::RetryAfter(retry_delay_from_response(
-            retry, attempt, status, headers,
-        )));
-    }
+    // Retry transient I/O failures. TLS, request framing, and body write errors
+    // require caller intervention and must not replay the request.
+    matches!(
+        error,
+        reqx::Error::Transport {
+            kind: TransportErrorKind::Dns | TransportErrorKind::Connect | TransportErrorKind::Read,
+            ..
+        } | reqx::Error::Timeout { .. }
+            | reqx::Error::ReadBody { .. }
+    )
+    .then(|| backoff_delay(retry, attempt))
+}
 
-    None
+#[cfg(any(feature = "async", feature = "blocking"))]
+pub(crate) fn service_retry_delay(
+    retry: RetryConfig,
+    attempt: u32,
+    max_attempts: u32,
+    method: &Method,
+    error: &crate::Error,
+) -> Option<Duration> {
+    let error = error.api_error()?;
+    if attempt >= max_attempts
+        || !error.is_retryable()
+        || !(method_allows_status_retry(method) || error.has_retryable_code())
+    {
+        return None;
+    }
+    Some(match error.retry_after {
+        Some(delay) => clamp_retry_after(retry, delay),
+        None => backoff_delay(retry, attempt),
+    })
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
@@ -636,11 +533,6 @@ fn method_allows_status_retry(method: &Method) -> bool {
         *method,
         Method::GET | Method::HEAD | Method::PUT | Method::DELETE
     )
-}
-
-#[cfg(any(feature = "async", feature = "blocking"))]
-fn is_retryable_http_status(status: http::StatusCode) -> bool {
-    status == http::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
@@ -654,294 +546,109 @@ struct SanitizedReqxSource {
 
 #[cfg(any(feature = "async", feature = "blocking"))]
 impl SanitizedReqxSource {
-    fn new(
-        code: reqx::ErrorCode,
-        method: Option<http::Method>,
-        uri: Option<String>,
-        detail: Option<String>,
-        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
-    ) -> Self {
-        Self {
-            code,
-            method,
-            uri,
-            detail,
-            source,
-        }
-    }
-
-    fn with_uri(uri: String) -> Option<String> {
-        Some(redacted_uri_for_error(&uri))
-    }
-
     fn from_reqx(error: reqx::Error) -> Self {
-        let fallback_code = error.code();
-        let fallback_method = error.request_method().cloned();
-        let fallback_uri = error
-            .request_uri_redacted_owned()
-            .map(|uri| redacted_uri_for_error(&uri));
+        let mut sanitized = Self {
+            code: error.code(),
+            method: error.request_method().cloned(),
+            uri: error.request_uri_redacted().map(redacted_uri_for_error),
+            detail: None,
+            source: None,
+        };
 
         match error {
-            reqx::Error::InvalidUri { uri } => Self::new(
-                reqx::ErrorCode::InvalidUri,
-                None,
-                Self::with_uri(uri),
-                None,
-                None,
-            ),
-            reqx::Error::InvalidNoProxyRule { rule } => Self::new(
-                reqx::ErrorCode::InvalidNoProxyRule,
-                None,
-                None,
-                Some(format!("rule={rule:?}")),
-                None,
-            ),
-            reqx::Error::InvalidProxyConfig { proxy_uri, message } => Self::new(
-                reqx::ErrorCode::InvalidProxyConfig,
-                None,
-                Self::with_uri(proxy_uri),
-                Some(message),
-                None,
-            ),
-            reqx::Error::ProxyAuthorizationRequiresHttpProxy => Self::new(
-                reqx::ErrorCode::InvalidProxyConfig,
-                None,
-                None,
-                Some("proxy_authorization requires http_proxy".to_string()),
-                None,
-            ),
+            reqx::Error::InvalidNoProxyRule { rule } => {
+                sanitized.detail = Some(format!("rule={rule:?}"));
+            }
+            reqx::Error::InvalidProxyConfig { message, .. } => {
+                sanitized.detail = Some(message);
+            }
+            reqx::Error::ProxyAuthorizationRequiresHttpProxy => {
+                sanitized.detail = Some("proxy_authorization requires http_proxy".to_string());
+            }
             reqx::Error::InvalidAdaptiveConcurrencyPolicy {
                 min_limit,
                 initial_limit,
                 max_limit,
                 message,
-            } => Self::new(
-                reqx::ErrorCode::InvalidAdaptiveConcurrencyPolicy,
-                None,
-                None,
-                Some(format!(
+            } => {
+                sanitized.detail = Some(format!(
                     "min_limit={min_limit} initial_limit={initial_limit} max_limit={max_limit}: {message}"
-                )),
-                None,
-            ),
-            reqx::Error::SerializeJson { source } => Self::new(
-                reqx::ErrorCode::SerializeJson,
-                None,
-                None,
-                None,
-                Some(Box::new(source)),
-            ),
-            reqx::Error::SerializeQuery { source } => Self::new(
-                reqx::ErrorCode::SerializeQuery,
-                None,
-                None,
-                None,
-                Some(Box::new(source)),
-            ),
-            reqx::Error::SerializeForm { source } => Self::new(
-                reqx::ErrorCode::SerializeForm,
-                None,
-                None,
-                None,
-                Some(Box::new(source)),
-            ),
-            reqx::Error::RequestBuild { source } => Self::new(
-                reqx::ErrorCode::RequestBuild,
-                None,
-                None,
-                None,
-                Some(Box::new(source)),
-            ),
+                ));
+            }
+            reqx::Error::SerializeJson { source } | reqx::Error::DeserializeJson { source, .. } => {
+                sanitized.source = Some(Box::new(source));
+            }
+            reqx::Error::SerializeQuery { source } | reqx::Error::SerializeForm { source } => {
+                sanitized.source = Some(Box::new(source));
+            }
+            reqx::Error::RequestBuild { source } => {
+                sanitized.source = Some(Box::new(source));
+            }
             reqx::Error::Transport {
                 kind,
-                method,
-                uri,
                 message,
                 source,
                 ..
-            } => Self::new(
-                reqx::ErrorCode::Transport,
-                Some(method),
-                Self::with_uri(uri),
-                Some(format!("kind={kind}: {message}")),
-                Some(source),
-            ),
+            } => {
+                sanitized.detail = Some(format!("kind={kind}: {message}"));
+                sanitized.source = Some(source);
+            }
             reqx::Error::Timeout {
-                phase,
-                timeout_ms,
-                method,
-                uri,
-            } => Self::new(
-                reqx::ErrorCode::Timeout,
-                Some(method),
-                Self::with_uri(uri),
-                Some(format!("phase={phase} timeout_ms={timeout_ms}")),
-                None,
-            ),
-            reqx::Error::DeadlineExceeded {
-                timeout_ms,
-                method,
-                uri,
-            } => Self::new(
-                reqx::ErrorCode::DeadlineExceeded,
-                Some(method),
-                Self::with_uri(uri),
-                Some(format!("timeout_ms={timeout_ms}")),
-                None,
-            ),
-            reqx::Error::ReadBody { source } => {
-                Self::new(reqx::ErrorCode::ReadBody, None, None, None, Some(source))
+                phase, timeout_ms, ..
+            } => {
+                sanitized.detail = Some(format!("phase={phase} timeout_ms={timeout_ms}"));
+            }
+            reqx::Error::DeadlineExceeded { timeout_ms, .. } => {
+                sanitized.detail = Some(format!("timeout_ms={timeout_ms}"));
+            }
+            reqx::Error::ReadBody { source } | reqx::Error::WriteBody { source, .. } => {
+                sanitized.source = Some(source);
             }
             reqx::Error::ResponseBodyTooLarge {
                 limit_bytes,
                 actual_bytes,
-                method,
-                uri,
-            } => Self::new(
-                reqx::ErrorCode::ResponseBodyTooLarge,
-                Some(method),
-                Self::with_uri(uri),
-                Some(format!(
-                    "actual_bytes={actual_bytes} limit_bytes={limit_bytes}"
-                )),
-                None,
-            ),
-            reqx::Error::HttpStatus {
-                status,
-                method,
-                uri,
                 ..
-            } => Self::new(
-                reqx::ErrorCode::HttpStatus,
-                Some(method),
-                Self::with_uri(uri),
-                Some(format!("status={status}")),
-                None,
-            ),
-            reqx::Error::DeserializeJson { source, .. } => Self::new(
-                reqx::ErrorCode::DeserializeJson,
-                None,
-                None,
-                None,
-                Some(Box::new(source)),
-            ),
-            reqx::Error::DecodeText { source, .. } => Self::new(
-                reqx::ErrorCode::DecodeText,
-                None,
-                None,
-                None,
-                Some(Box::new(source)),
-            ),
-            reqx::Error::InvalidHeaderName { name, source } => Self::new(
-                reqx::ErrorCode::InvalidHeaderName,
-                None,
-                None,
-                Some(format!("name={name}")),
-                Some(Box::new(source)),
-            ),
-            reqx::Error::InvalidHeaderValue { name, source } => Self::new(
-                reqx::ErrorCode::InvalidHeaderValue,
-                None,
-                None,
-                Some(format!("name={name}")),
-                Some(Box::new(source)),
-            ),
+            } => {
+                sanitized.detail = Some(format!(
+                    "actual_bytes={actual_bytes} limit_bytes={limit_bytes}"
+                ));
+            }
+            reqx::Error::HttpStatus { status, .. }
+            | reqx::Error::MissingRedirectLocation { status, .. } => {
+                sanitized.detail = Some(format!("status={status}"));
+            }
+            reqx::Error::DecodeText { source, .. } => {
+                sanitized.source = Some(Box::new(source));
+            }
+            reqx::Error::InvalidHeaderName { name, source } => {
+                sanitized.detail = Some(format!("name={name}"));
+                sanitized.source = Some(Box::new(source));
+            }
+            reqx::Error::InvalidHeaderValue { name, source } => {
+                sanitized.detail = Some(format!("name={name}"));
+                sanitized.source = Some(Box::new(source));
+            }
             reqx::Error::DecodeContentEncoding {
-                encoding,
-                method,
-                uri,
-                message,
-            } => Self::new(
-                reqx::ErrorCode::DecodeContentEncoding,
-                Some(method),
-                Self::with_uri(uri),
-                Some(format!("encoding={encoding}: {message}")),
-                None,
-            ),
-            reqx::Error::ConcurrencyLimitClosed => Self::new(
-                reqx::ErrorCode::ConcurrencyLimitClosed,
-                None,
-                None,
-                None,
-                None,
-            ),
-            reqx::Error::TlsBackendUnavailable { backend } => Self::new(
-                reqx::ErrorCode::TlsBackendUnavailable,
-                None,
-                None,
-                Some(format!("backend={backend}")),
-                None,
-            ),
-            reqx::Error::TlsBackendInit { backend, message } => Self::new(
-                reqx::ErrorCode::TlsBackendInit,
-                None,
-                None,
-                Some(format!("backend={backend}: {message}")),
-                None,
-            ),
-            reqx::Error::TlsConfig { backend, message } => Self::new(
-                reqx::ErrorCode::TlsConfig,
-                None,
-                None,
-                Some(format!("backend={backend}: {message}")),
-                None,
-            ),
-            reqx::Error::RetryBudgetExhausted { method, uri } => Self::new(
-                reqx::ErrorCode::RetryBudgetExhausted,
-                Some(method),
-                Self::with_uri(uri),
-                None,
-                None,
-            ),
-            reqx::Error::CircuitOpen {
-                method,
-                uri,
-                retry_after_ms,
-            } => Self::new(
-                reqx::ErrorCode::CircuitOpen,
-                Some(method),
-                Self::with_uri(uri),
-                Some(format!("retry_after_ms={retry_after_ms}")),
-                None,
-            ),
-            reqx::Error::MissingRedirectLocation {
-                status,
-                method,
-                uri,
-            } => Self::new(
-                reqx::ErrorCode::MissingRedirectLocation,
-                Some(method),
-                Self::with_uri(uri),
-                Some(format!("status={status}")),
-                None,
-            ),
-            reqx::Error::InvalidRedirectLocation { method, uri, .. } => Self::new(
-                reqx::ErrorCode::InvalidRedirectLocation,
-                Some(method),
-                Self::with_uri(uri),
-                None,
-                None,
-            ),
-            reqx::Error::RedirectLimitExceeded {
-                max_redirects,
-                method,
-                uri,
-            } => Self::new(
-                reqx::ErrorCode::RedirectLimitExceeded,
-                Some(method),
-                Self::with_uri(uri),
-                Some(format!("max_redirects={max_redirects}")),
-                None,
-            ),
-            reqx::Error::RedirectBodyNotReplayable { method, uri } => Self::new(
-                reqx::ErrorCode::RedirectBodyNotReplayable,
-                Some(method),
-                Self::with_uri(uri),
-                None,
-                None,
-            ),
-            _ => Self::new(fallback_code, fallback_method, fallback_uri, None, None),
+                encoding, message, ..
+            } => {
+                sanitized.detail = Some(format!("encoding={encoding}: {message}"));
+            }
+            reqx::Error::TlsBackendUnavailable { backend } => {
+                sanitized.detail = Some(format!("backend={backend}"));
+            }
+            reqx::Error::TlsBackendInit { backend, message }
+            | reqx::Error::TlsConfig { backend, message } => {
+                sanitized.detail = Some(format!("backend={backend}: {message}"));
+            }
+            reqx::Error::CircuitOpen { retry_after_ms, .. } => {
+                sanitized.detail = Some(format!("retry_after_ms={retry_after_ms}"));
+            }
+            reqx::Error::RedirectLimitExceeded { max_redirects, .. } => {
+                sanitized.detail = Some(format!("max_redirects={max_redirects}"));
+            }
+            _ => {}
         }
+        sanitized
     }
 }
 
@@ -999,8 +706,15 @@ pub(crate) fn map_reqx_error(message: &str, err: reqx::Error) -> crate::error::E
             body,
             ..
         } => {
-            let status = http::StatusCode::from_u16(status)
-                .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+            let status = match http::StatusCode::from_u16(status) {
+                Ok(status) => status,
+                Err(source) => {
+                    return crate::Error::decode(
+                        "HTTP client returned an invalid status",
+                        Some(Box::new(source)),
+                    );
+                }
+            };
             response_error_from_status(status, &headers, &body)
         }
         reqx::Error::DeserializeJson { source, .. } => crate::error::Error::decode(
@@ -1011,49 +725,6 @@ pub(crate) fn map_reqx_error(message: &str, err: reqx::Error) -> crate::error::E
             message,
             Some(Box::new(SanitizedReqxSource::from_reqx(other))),
         ),
-    }
-}
-
-#[cfg(all(test, any(feature = "async", feature = "blocking")))]
-pub(crate) fn followed_redirect(request_url: &Url, response_uri: &str) -> bool {
-    if response_uri == request_url.as_str() {
-        return false;
-    }
-
-    let Ok(response_url) = Url::parse(response_uri) else {
-        // Treat an unparseable-but-different URI as suspicious to avoid returning
-        // silently redirected successes.
-        return true;
-    };
-
-    request_url.scheme() != response_url.scheme()
-        || request_url.username() != response_url.username()
-        || request_url.password() != response_url.password()
-        || request_url.host_str() != response_url.host_str()
-        || request_url.port_or_known_default() != response_url.port_or_known_default()
-        || request_url.path() != response_url.path()
-        || request_url.query() != response_url.query()
-}
-
-#[cfg(all(test, any(feature = "async", feature = "blocking")))]
-pub(crate) fn unexpected_redirect_error(
-    method: &Method,
-    request_url: &Url,
-    response_uri: &str,
-) -> crate::error::Error {
-    let request = redacted_url_for_error(request_url);
-    let response = redacted_response_uri_for_error(response_uri);
-    crate::error::Error::transport(
-        format!("unexpected redirect followed for {method} {request} -> {response}",),
-        None,
-    )
-}
-
-#[cfg(all(test, any(feature = "async", feature = "blocking")))]
-fn redacted_response_uri_for_error(response_uri: &str) -> String {
-    match Url::parse(response_uri) {
-        Ok(url) => redacted_url_for_error(&url),
-        Err(_) => "<unparseable-uri>".to_string(),
     }
 }
 
@@ -1081,11 +752,6 @@ pub(crate) fn redacted_url_for_error(url: &Url) -> String {
         out.push_str("?<redacted>");
     }
     out
-}
-
-#[cfg(all(test, any(feature = "async", feature = "blocking")))]
-pub(crate) fn redacted_request_context(method: &Method, url: &Url) -> String {
-    format!("{method} {}", redacted_url_for_error(url))
 }
 
 #[cfg(any(feature = "tracing", feature = "async", feature = "blocking"))]
@@ -1145,6 +811,38 @@ mod tests {
 
         assert_eq!(backoff_delay(cfg, 1), Duration::from_millis(0));
         assert_eq!(backoff_delay(cfg, 10), Duration::from_millis(0));
+    }
+
+    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[test]
+    fn transport_retries_preserve_safety_and_attempt_limits() {
+        let retry = RetryConfig {
+            base_delay: Duration::ZERO,
+            ..RetryConfig::default()
+        };
+        for (kind, retryable) in [
+            (reqx::TransportErrorKind::Dns, true),
+            (reqx::TransportErrorKind::Connect, true),
+            (reqx::TransportErrorKind::Read, true),
+            (reqx::TransportErrorKind::Tls, false),
+            (reqx::TransportErrorKind::Other, false),
+        ] {
+            let error = reqx::Error::Transport {
+                kind,
+                method: Method::GET,
+                uri: "http://localhost/".to_string(),
+                message: "test failure".to_string(),
+                source: Box::new(std::io::Error::other("test failure")),
+            };
+            assert_eq!(
+                transport_retry_delay(retry, 1, 2, &Method::GET, &error).is_some(),
+                retryable,
+                "kind={kind}"
+            );
+            assert!(transport_retry_delay(retry, 2, 2, &Method::GET, &error).is_none());
+            assert!(transport_retry_delay(retry, 1, 1, &Method::GET, &error).is_none());
+            assert!(transport_retry_delay(retry, 1, 2, &Method::POST, &error).is_none());
+        }
     }
 
     #[test]
@@ -1227,13 +925,14 @@ mod tests {
         };
 
         match map_reqx_error("request failed", err) {
-            crate::error::Error::Api {
-                status,
-                code,
-                message,
-                request_id,
-                ..
-            } => {
+            crate::error::Error::Api(error) => {
+                let crate::ApiError {
+                    status,
+                    code,
+                    message,
+                    request_id,
+                    ..
+                } = *error;
                 assert_eq!(status, http::StatusCode::FORBIDDEN);
                 assert_eq!(code.as_deref(), Some("AccessDenied"));
                 assert_eq!(message.as_deref(), Some("Access Denied"));
@@ -1241,6 +940,32 @@ mod tests {
             }
             other => panic!("expected Api error, got {other:?}"),
         }
+    }
+
+    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[test]
+    fn map_reqx_error_write_body_preserves_source_and_redacts_context() {
+        let err = reqx::Error::WriteBody {
+            method: http::Method::GET,
+            uri: "https://private.example.com/object?token=secret".to_string(),
+            source: Box::new(std::io::Error::other("writer failed")),
+        };
+        let mapped = map_reqx_error("request failed", err);
+        let crate::Error::Transport { source, .. } = mapped else {
+            panic!("expected Transport error");
+        };
+        let source = source.unwrap();
+        let text = source.to_string();
+        assert!(text.contains("GET"));
+        assert!(text.contains("<redacted-host>"));
+        assert!(!text.contains("private.example.com"));
+        assert!(!text.contains("secret"));
+        let cause = source
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(cause.to_string(), "writer failed");
     }
 
     #[cfg(any(feature = "async", feature = "blocking"))]
@@ -1328,8 +1053,9 @@ mod tests {
         );
     }
 
+    #[cfg(any(feature = "async", feature = "blocking"))]
     #[test]
-    fn retry_delay_from_response_uses_retry_after_for_503() {
+    fn service_retry_delay_honors_retry_after_for_http_and_service_errors() {
         let config = RetryConfig {
             max_attempts: 3,
             base_delay: Duration::from_millis(200),
@@ -1342,9 +1068,29 @@ mod tests {
             http::HeaderValue::from_static("5"),
         );
 
+        for status in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::BAD_REQUEST] {
+            let error = response_error_from_status(
+                status,
+                &headers,
+                "<Error><Code>SlowDown</Code></Error>",
+            );
+            assert_eq!(
+                service_retry_delay(config, 1, 3, &Method::GET, &error),
+                Some(Duration::from_secs(5))
+            );
+            assert_eq!(
+                service_retry_delay(config, 3, 3, &Method::GET, &error),
+                None
+            );
+        }
+        let error = response_error_from_status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &headers,
+            "<Error><Code>Unknown</Code></Error>",
+        );
         assert_eq!(
-            retry_delay_from_response(config, 1, http::StatusCode::SERVICE_UNAVAILABLE, &headers),
-            Duration::from_secs(5)
+            service_retry_delay(config, 1, 3, &Method::POST, &error),
+            None
         );
     }
 
@@ -1369,11 +1115,12 @@ mod tests {
 
         for status in api_statuses {
             match response_error_from_status(status, &headers, "plain error body") {
-                crate::error::Error::Api {
-                    status: got_status,
-                    request_id,
-                    ..
-                } => {
+                crate::error::Error::Api(error) => {
+                    let crate::ApiError {
+                        status: got_status,
+                        request_id,
+                        ..
+                    } = *error;
                     assert_eq!(got_status, status);
                     assert_eq!(request_id.as_deref(), Some("req-matrix"));
                 }
@@ -1387,14 +1134,16 @@ mod tests {
         );
         match response_error_from_status(http::StatusCode::TOO_MANY_REQUESTS, &headers, "throttled")
         {
-            crate::error::Error::RateLimited {
-                retry_after,
-                request_id,
-                code,
-                message,
-                host_id,
-                ..
-            } => {
+            crate::error::Error::Api(error) => {
+                assert!(error.is_rate_limited());
+                let crate::ApiError {
+                    retry_after,
+                    request_id,
+                    code,
+                    message,
+                    host_id,
+                    ..
+                } = *error;
                 assert_eq!(retry_after, Some(Duration::from_secs(3)));
                 assert_eq!(request_id.as_deref(), Some("req-matrix"));
                 assert!(code.is_none());
@@ -1407,17 +1156,16 @@ mod tests {
 
     #[cfg(any(feature = "async", feature = "blocking"))]
     #[test]
-    fn response_error_from_body_rejects_invalid_utf8() {
+    fn response_error_preserves_http_status_for_non_utf8_bodies() {
         let err = response_error_from_body(
             http::StatusCode::INTERNAL_SERVER_ERROR,
             &http::HeaderMap::new(),
             &[0xff],
         );
 
-        match err {
-            crate::error::Error::Decode { message, .. } => assert!(message.contains("UTF-8")),
-            other => panic!("expected Decode error, got {other:?}"),
-        }
+        assert_eq!(err.status(), Some(StatusCode::INTERNAL_SERVER_ERROR));
+        assert_eq!(err.body_snippet(), None);
+        assert!(service_retry_delay(RetryConfig::default(), 1, 3, &Method::GET, &err).is_some());
     }
 
     #[cfg(any(feature = "async", feature = "blocking"))]
@@ -1435,100 +1183,17 @@ mod tests {
 
         match response_error_from_status(http::StatusCode::FORBIDDEN, &headers, "plain error body")
         {
-            crate::error::Error::Api {
-                request_id,
-                host_id,
-                ..
-            } => {
+            crate::error::Error::Api(error) => {
+                let crate::ApiError {
+                    request_id,
+                    host_id,
+                    ..
+                } = *error;
                 assert_eq!(request_id.as_deref(), Some("req-header"));
                 assert_eq!(host_id.as_deref(), Some("host-header"));
             }
             other => panic!("expected Api error, got {other:?}"),
         }
-    }
-
-    #[cfg(any(feature = "async", feature = "blocking"))]
-    #[test]
-    fn followed_redirect_flags_query_loss_when_authority_and_path_match() {
-        let request_url =
-            Url::parse("http://127.0.0.1:9000/demo-bucket?list-type=2&max-keys=1").unwrap();
-        let response_uri = "http://127.0.0.1:9000/demo-bucket";
-        assert!(followed_redirect(&request_url, response_uri));
-    }
-
-    #[cfg(any(feature = "async", feature = "blocking"))]
-    #[test]
-    fn followed_redirect_still_flags_path_change() {
-        let request_url = Url::parse("http://127.0.0.1:9000/demo-bucket?uploads=").unwrap();
-        let response_uri = "http://127.0.0.1:9000/other-bucket";
-        assert!(followed_redirect(&request_url, response_uri));
-    }
-
-    #[cfg(any(feature = "async", feature = "blocking"))]
-    #[test]
-    fn followed_redirect_flags_query_change_when_response_includes_query() {
-        let request_url = Url::parse("http://127.0.0.1:9000/demo-bucket?uploads=").unwrap();
-        let response_uri = "http://127.0.0.1:9000/demo-bucket?uploads=1";
-        assert!(followed_redirect(&request_url, response_uri));
-    }
-
-    #[cfg(any(feature = "async", feature = "blocking"))]
-    #[test]
-    fn followed_redirect_flags_added_query() {
-        let request_url = Url::parse("http://127.0.0.1:9000/demo-bucket").unwrap();
-        let response_uri = "http://127.0.0.1:9000/demo-bucket?list-type=2";
-        assert!(followed_redirect(&request_url, response_uri));
-    }
-
-    #[cfg(any(feature = "async", feature = "blocking"))]
-    #[test]
-    fn unexpected_redirect_error_redacts_query_values() {
-        let request_url = Url::parse(
-            "https://example.com/path?X-Amz-Credential=AKIA&X-Amz-Signature=super-secret",
-        )
-        .expect("valid URL");
-        let response_uri = "https://example.com/path?token=secret-token";
-        let err = unexpected_redirect_error(&Method::GET, &request_url, response_uri);
-
-        match err {
-            crate::error::Error::Transport { message, .. } => {
-                assert!(message.contains("https://<redacted-host>/<redacted>?<redacted>"));
-                assert!(message.contains("-> https://<redacted-host>/<redacted>?<redacted>"));
-                assert!(!message.contains("example.com"));
-                assert!(!message.contains("/path"));
-                assert!(!message.contains("X-Amz-Credential"));
-                assert!(!message.contains("X-Amz-Signature"));
-                assert!(!message.contains("secret-token"));
-            }
-            other => panic!("expected transport error, got {other:?}"),
-        }
-    }
-
-    #[cfg(any(feature = "async", feature = "blocking"))]
-    #[test]
-    fn unexpected_redirect_error_hides_unparseable_uri_contents() {
-        let request_url =
-            Url::parse("https://example.com/path?X-Amz-Signature=super-secret").expect("valid URL");
-        let err = unexpected_redirect_error(&Method::GET, &request_url, "%%%bad uri%%%");
-        match err {
-            crate::error::Error::Transport { message, .. } => {
-                assert!(message.contains("<unparseable-uri>"));
-                assert!(!message.contains("%%%bad uri%%%"));
-                assert!(!message.contains("super-secret"));
-            }
-            other => panic!("expected transport error, got {other:?}"),
-        }
-    }
-
-    #[cfg(any(feature = "async", feature = "blocking"))]
-    #[test]
-    fn redacted_request_context_hides_path_and_query() {
-        let url = Url::parse("https://example.com/private/key/path?token=secret").expect("url");
-        let ctx = redacted_request_context(&Method::GET, &url);
-        assert!(ctx.contains("GET https://<redacted-host>/<redacted>?<redacted>"));
-        assert!(!ctx.contains("example.com"));
-        assert!(!ctx.contains("private/key/path"));
-        assert!(!ctx.contains("token=secret"));
     }
 
     #[cfg(any(feature = "async", feature = "blocking"))]
@@ -1566,14 +1231,16 @@ mod tests {
 "#;
 
         match response_error_from_status(http::StatusCode::TOO_MANY_REQUESTS, &headers, body) {
-            crate::error::Error::RateLimited {
-                request_id,
-                code,
-                message,
-                host_id,
-                body_snippet,
-                ..
-            } => {
+            crate::error::Error::Api(error) => {
+                assert!(error.is_rate_limited());
+                let crate::ApiError {
+                    request_id,
+                    code,
+                    message,
+                    host_id,
+                    body_snippet,
+                    ..
+                } = *error;
                 assert_eq!(request_id.as_deref(), Some("req-inner"));
                 assert_eq!(code.as_deref(), Some("SlowDown"));
                 assert_eq!(message.as_deref(), Some("slow down"));
@@ -1602,12 +1269,13 @@ mod tests {
         let err = response_service_error(http::StatusCode::OK, &headers, body)
             .expect("expected embedded error to be detected");
         match err {
-            crate::error::Error::Api {
-                status,
-                code,
-                request_id,
-                ..
-            } => {
+            crate::error::Error::Api(error) => {
+                let crate::ApiError {
+                    status,
+                    code,
+                    request_id,
+                    ..
+                } = *error;
                 assert_eq!(status, http::StatusCode::OK);
                 assert_eq!(code.as_deref(), Some("InternalError"));
                 assert_eq!(request_id.as_deref(), Some("req-success-xml"));
@@ -1658,9 +1326,10 @@ mod tests {
             response_service_error(http::StatusCode::BAD_REQUEST, &http::HeaderMap::new(), body)
                 .expect("request-id-only payload should be treated as service error");
         match err {
-            crate::error::Error::Api {
-                status, request_id, ..
-            } => {
+            crate::error::Error::Api(error) => {
+                let crate::ApiError {
+                    status, request_id, ..
+                } = *error;
                 assert_eq!(status, http::StatusCode::BAD_REQUEST);
                 assert_eq!(request_id.as_deref(), Some("req-only"));
             }
@@ -1676,47 +1345,14 @@ mod tests {
             response_service_error(http::StatusCode::BAD_REQUEST, &http::HeaderMap::new(), body)
                 .expect("expected embedded service error");
         match err {
-            crate::error::Error::RateLimited { status, code, .. } => {
+            crate::error::Error::Api(error) => {
+                assert!(error.is_rate_limited());
+                let crate::ApiError { status, code, .. } = *error;
                 assert_eq!(status, http::StatusCode::BAD_REQUEST);
                 assert_eq!(code.as_deref(), Some("SlowDown"));
             }
             other => panic!("expected RateLimited, got {other:?}"),
         }
-    }
-
-    #[cfg(any(feature = "async", feature = "blocking"))]
-    #[test]
-    fn service_error_action_ignores_invalid_utf8_for_embedded_error_detection() {
-        let retry = RetryConfig {
-            max_attempts: 2,
-            ..RetryConfig::default()
-        };
-
-        assert!(
-            service_error_action(
-                retry,
-                1,
-                2,
-                &Method::GET,
-                http::StatusCode::OK,
-                &http::HeaderMap::new(),
-                &[0xff],
-            )
-            .is_none()
-        );
-
-        assert!(matches!(
-            service_error_action(
-                retry,
-                1,
-                2,
-                &Method::GET,
-                http::StatusCode::SERVICE_UNAVAILABLE,
-                &http::HeaderMap::new(),
-                &[0xff],
-            ),
-            Some(ServiceErrorAction::RetryAfter(_))
-        ));
     }
 
     #[cfg(all(

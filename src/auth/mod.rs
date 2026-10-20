@@ -10,4 +10,4 @@ pub use cache::CachedProvider;
 pub use model::{AddressingStyle, Auth, Credentials, CredentialsSnapshot, Region};
 #[cfg(feature = "async")]
 pub use provider::CredentialsFuture;
-pub use provider::{CredentialsProvider, CredentialsTlsRootStore, DynCredentialsProvider};
+pub use provider::{CredentialsProvider, DynCredentialsProvider};

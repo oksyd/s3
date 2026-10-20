@@ -1,7 +1,10 @@
 use http::{
-    HeaderMap, HeaderValue, StatusCode,
+    HeaderMap, HeaderValue,
     header::{HeaderName, IntoHeaderName},
 };
+
+#[cfg(feature = "multipart")]
+use std::collections::{BTreeMap, btree_map::Entry};
 
 #[cfg(feature = "multipart")]
 use crate::types::CompletedPart;
@@ -51,22 +54,14 @@ pub(crate) fn header_value(
     HeaderValue::from_str(value.as_ref()).map_err(|_| Error::invalid_config(invalid_message))
 }
 
-pub(crate) fn validate_header_value(value: &str, invalid_message: &'static str) -> Result<()> {
+pub(crate) fn validated_header_value(
+    value: &str,
+    invalid_message: &'static str,
+) -> Result<HeaderValue> {
     if value.is_empty() || value.trim() != value {
         return Err(Error::invalid_config(invalid_message));
     }
-    header_value(value, invalid_message)?;
-    Ok(())
-}
-
-fn validate_metadata_value(value: &str) -> Result<()> {
-    if value.trim() != value {
-        return Err(Error::invalid_config(
-            "metadata values must not include leading or trailing whitespace",
-        ));
-    }
-    header_value(value, "invalid metadata header value")?;
-    Ok(())
+    header_value(value, invalid_message)
 }
 
 pub(crate) fn insert_header<K>(
@@ -82,186 +77,49 @@ where
     Ok(())
 }
 
-pub(crate) fn insert_optional_header(
+pub(crate) fn insert_validated_header(
     headers: &mut HeaderMap,
     name: HeaderName,
-    value: Option<String>,
+    value: impl AsRef<str>,
     invalid_message: &'static str,
 ) -> Result<()> {
-    if let Some(value) = value {
-        validate_header_value(&value, invalid_message)?;
-        insert_header(headers, name, value, invalid_message)?;
-    }
+    headers.insert(
+        name,
+        validated_header_value(value.as_ref(), invalid_message)?,
+    );
     Ok(())
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ObjectConditions {
-    if_match: Option<String>,
-    if_none_match: Option<String>,
+    if_match: Option<HeaderValue>,
+    if_none_match: Option<HeaderValue>,
 }
 
 impl ObjectConditions {
     pub(crate) fn set_if_match(&mut self, value: impl Into<String>) -> Result<()> {
-        let value = value.into();
-        validate_header_value(&value, "invalid If-Match header")?;
-        self.if_match = Some(value);
+        self.if_match = Some(validated_header_value(
+            &value.into(),
+            "invalid If-Match header",
+        )?);
         Ok(())
     }
 
     pub(crate) fn set_if_none_match(&mut self, value: impl Into<String>) -> Result<()> {
-        let value = value.into();
-        validate_header_value(&value, "invalid If-None-Match header")?;
-        self.if_none_match = Some(value);
-        Ok(())
-    }
-
-    pub(crate) fn apply(self, headers: &mut HeaderMap) -> Result<()> {
-        insert_optional_header(
-            headers,
-            http::header::IF_MATCH,
-            self.if_match,
-            "invalid If-Match header",
-        )?;
-        insert_optional_header(
-            headers,
-            http::header::IF_NONE_MATCH,
-            self.if_none_match,
+        self.if_none_match = Some(validated_header_value(
+            &value.into(),
             "invalid If-None-Match header",
-        )
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct PutObjectHeaders {
-    content_type: Option<String>,
-    cache_control: Option<String>,
-    content_disposition: Option<String>,
-    content_encoding: Option<String>,
-    content_language: Option<String>,
-    expires: Option<String>,
-    conditions: ObjectConditions,
-    metadata: Vec<(String, String)>,
-}
-
-impl PutObjectHeaders {
-    pub(crate) fn content_type(&mut self, value: impl Into<String>) -> Result<()> {
-        self.set_optional_header(value, "invalid Content-Type header", |headers, value| {
-            headers.content_type = Some(value);
-        })
-    }
-
-    pub(crate) fn cache_control(&mut self, value: impl Into<String>) -> Result<()> {
-        self.set_optional_header(value, "invalid Cache-Control header", |headers, value| {
-            headers.cache_control = Some(value);
-        })
-    }
-
-    pub(crate) fn content_disposition(&mut self, value: impl Into<String>) -> Result<()> {
-        self.set_optional_header(
-            value,
-            "invalid Content-Disposition header",
-            |headers, value| {
-                headers.content_disposition = Some(value);
-            },
-        )
-    }
-
-    pub(crate) fn content_encoding(&mut self, value: impl Into<String>) -> Result<()> {
-        self.set_optional_header(
-            value,
-            "invalid Content-Encoding header",
-            |headers, value| {
-                headers.content_encoding = Some(value);
-            },
-        )
-    }
-
-    pub(crate) fn content_language(&mut self, value: impl Into<String>) -> Result<()> {
-        self.set_optional_header(
-            value,
-            "invalid Content-Language header",
-            |headers, value| {
-                headers.content_language = Some(value);
-            },
-        )
-    }
-
-    pub(crate) fn expires(&mut self, value: impl Into<String>) -> Result<()> {
-        self.set_optional_header(value, "invalid Expires header", |headers, value| {
-            headers.expires = Some(value);
-        })
-    }
-
-    pub(crate) fn if_match(&mut self, value: impl Into<String>) -> Result<()> {
-        self.conditions.set_if_match(value)
-    }
-
-    pub(crate) fn if_none_match(&mut self, value: impl Into<String>) -> Result<()> {
-        self.conditions.set_if_none_match(value)
-    }
-
-    pub(crate) fn metadata(
-        &mut self,
-        key: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Result<()> {
-        push_metadata(&mut self.metadata, key, value)
-    }
-
-    pub(crate) fn into_header_map(self) -> Result<HeaderMap> {
-        let mut headers = HeaderMap::new();
-        insert_optional_header(
-            &mut headers,
-            http::header::CONTENT_TYPE,
-            self.content_type,
-            "invalid Content-Type header",
-        )?;
-        insert_optional_header(
-            &mut headers,
-            http::header::CACHE_CONTROL,
-            self.cache_control,
-            "invalid Cache-Control header",
-        )?;
-        insert_optional_header(
-            &mut headers,
-            http::header::CONTENT_DISPOSITION,
-            self.content_disposition,
-            "invalid Content-Disposition header",
-        )?;
-        insert_optional_header(
-            &mut headers,
-            http::header::CONTENT_ENCODING,
-            self.content_encoding,
-            "invalid Content-Encoding header",
-        )?;
-        insert_optional_header(
-            &mut headers,
-            http::header::CONTENT_LANGUAGE,
-            self.content_language,
-            "invalid Content-Language header",
-        )?;
-        insert_optional_header(
-            &mut headers,
-            http::header::EXPIRES,
-            self.expires,
-            "invalid Expires header",
-        )?;
-        self.conditions.apply(&mut headers)?;
-        apply_metadata_headers(&mut headers, self.metadata)?;
-        Ok(headers)
-    }
-
-    fn set_optional_header(
-        &mut self,
-        value: impl Into<String>,
-        invalid_message: &'static str,
-        set: impl FnOnce(&mut Self, String),
-    ) -> Result<()> {
-        let value = value.into();
-        validate_header_value(&value, invalid_message)?;
-        set(self, value);
+        )?);
         Ok(())
+    }
+
+    pub(crate) fn apply(self, headers: &mut HeaderMap) {
+        if let Some(value) = self.if_match {
+            headers.insert(http::header::IF_MATCH, value);
+        }
+        if let Some(value) = self.if_none_match {
+            headers.insert(http::header::IF_NONE_MATCH, value);
+        }
     }
 }
 
@@ -299,33 +157,12 @@ pub(crate) fn validate_content_length_matches_body(
     Ok(body_len)
 }
 
-pub(crate) fn parse_xml_or_service_error<T>(
-    status: StatusCode,
-    headers: &HeaderMap,
-    body: &str,
+pub(crate) fn parse_xml_response<T>(
+    resp: reqx::Response,
     parse: impl FnOnce(&str) -> Result<T>,
 ) -> Result<T> {
-    match parse(body) {
-        Ok(value) => Ok(value),
-        Err(parse_error) => {
-            if crate::util::xml::parse_error_xml(body).is_some() {
-                return Err(crate::transport::response_error_from_status(
-                    status, headers, body,
-                ));
-            }
-            Err(parse_error)
-        }
-    }
-}
-
-#[cfg(feature = "async")]
-pub(crate) fn parse_async_xml_response<T>(
-    resp: crate::transport::async_transport::AsyncResponse,
-    parse: impl FnOnce(&str) -> Result<T>,
-) -> Result<T> {
-    let (status, headers, body) = resp.into_parts();
-    let body = crate::util::text::decode_utf8_response_body(body.as_ref())?;
-    parse_xml_or_service_error(status, &headers, &body, parse)
+    let body = crate::util::text::decode_utf8_response_body(resp.body())?;
+    parse(body)
 }
 
 pub(crate) fn create_bucket_location_constraint(
@@ -334,11 +171,11 @@ pub(crate) fn create_bucket_location_constraint(
 ) -> Result<Option<String>> {
     match explicit {
         Some(region) => {
-            crate::auth::Region::new(region.as_str())?;
+            crate::util::validation::validate_region("region", &region)?;
             Ok(Some(region))
         }
         None => {
-            crate::auth::Region::new(client_region)?;
+            crate::util::validation::validate_region("region", client_region)?;
             if client_region == "us-east-1" {
                 Ok(None)
             } else {
@@ -471,7 +308,7 @@ pub(crate) fn push_delete_object(
 
 #[cfg(feature = "multipart")]
 pub(crate) fn push_completed_part(
-    parts: &mut Vec<CompletedPart>,
+    parts: &mut BTreeMap<u32, CompletedPart>,
     part: CompletedPart,
 ) -> Result<()> {
     if parts.len() >= MAX_UPLOAD_PART_NUMBER as usize {
@@ -479,42 +316,15 @@ pub(crate) fn push_completed_part(
             "complete_multipart_upload supports at most 10000 completed parts",
         ));
     }
-    if parts
-        .iter()
-        .any(|existing| existing.part_number() == part.part_number())
-    {
-        return Err(Error::invalid_config(
+    match parts.entry(part.part_number()) {
+        Entry::Vacant(entry) => {
+            entry.insert(part);
+            Ok(())
+        }
+        Entry::Occupied(_) => Err(Error::invalid_config(
             "completed part numbers must be unique",
-        ));
+        )),
     }
-    parts.push(part);
-    Ok(())
-}
-
-#[cfg(feature = "multipart")]
-pub(crate) fn prepare_completed_parts(mut parts: Vec<CompletedPart>) -> Result<Vec<CompletedPart>> {
-    if parts.is_empty() {
-        return Err(Error::invalid_config(
-            "complete_multipart_upload requires at least one completed part",
-        ));
-    }
-    if parts.len() > MAX_UPLOAD_PART_NUMBER as usize {
-        return Err(Error::invalid_config(
-            "complete_multipart_upload supports at most 10000 completed parts",
-        ));
-    }
-
-    parts.sort_by_key(|part| part.part_number());
-    if parts
-        .windows(2)
-        .any(|pair| pair[0].part_number() == pair[1].part_number())
-    {
-        return Err(Error::invalid_config(
-            "completed part numbers must be unique",
-        ));
-    }
-
-    Ok(parts)
 }
 
 pub(crate) fn validate_subresource(subresource: &str) -> Result<()> {
@@ -537,56 +347,40 @@ pub(crate) fn validate_subresource(subresource: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn apply_metadata_headers(
-    headers: &mut HeaderMap,
-    metadata: Vec<(String, String)>,
-) -> Result<()> {
-    let mut pending = Vec::with_capacity(metadata.len());
-    for (name, value) in metadata {
-        let header_name = crate::util::redact::metadata_header_name(&name)?;
-        if headers.contains_key(&header_name)
-            || pending
-                .iter()
-                .any(|(existing, _): &(HeaderName, String)| existing == header_name)
-        {
-            return Err(Error::invalid_config("metadata keys must be unique"));
-        }
-        validate_metadata_value(&value)?;
-        pending.push((header_name, value));
+pub(crate) fn apply_metadata_headers(headers: &mut HeaderMap, metadata: HeaderMap) -> Result<()> {
+    if metadata.keys().any(|name| headers.contains_key(name)) {
+        return Err(Error::invalid_config("metadata keys must be unique"));
     }
-
-    for (name, value) in pending {
-        insert_header(headers, name, value, "invalid metadata header value")?;
-    }
+    headers.extend(metadata);
     Ok(())
 }
 
 pub(crate) fn push_metadata(
-    metadata: &mut Vec<(String, String)>,
+    metadata: &mut HeaderMap,
     key: impl Into<String>,
     value: impl Into<String>,
 ) -> Result<()> {
     let key = key.into();
     let value = value.into();
-    let header_name = crate::util::redact::metadata_header_name(&key)?;
-    validate_metadata_value(&value)?;
-
-    if metadata.iter().any(|(existing, _)| {
-        crate::util::redact::metadata_header_name(existing)
-            .is_ok_and(|existing_header| existing_header == header_name)
-    }) {
+    let header_name = crate::util::headers::metadata_header_name(&key)?;
+    if value.trim() != value {
+        return Err(Error::invalid_config(
+            "metadata values must not include leading or trailing whitespace",
+        ));
+    }
+    let value = header_value(value, "invalid metadata header value")?;
+    if metadata.contains_key(&header_name) {
         return Err(Error::invalid_config("metadata keys must be unique"));
     }
-
-    metadata.push((key, value));
+    metadata.insert(header_name, value);
     Ok(())
 }
 
 pub(crate) fn apply_copy_metadata_headers(
     headers: &mut HeaderMap,
     explicit_replace: bool,
-    content_type: Option<String>,
-    metadata: Vec<(String, String)>,
+    content_type: Option<HeaderValue>,
+    metadata: HeaderMap,
 ) -> Result<()> {
     let should_replace = explicit_replace || content_type.is_some() || !metadata.is_empty();
     if should_replace {
@@ -596,12 +390,9 @@ pub(crate) fn apply_copy_metadata_headers(
         );
     }
 
-    insert_optional_header(
-        headers,
-        http::header::CONTENT_TYPE,
-        content_type,
-        "invalid Content-Type header",
-    )?;
+    if let Some(value) = content_type {
+        headers.insert(http::header::CONTENT_TYPE, value);
+    }
     apply_metadata_headers(headers, metadata)
 }
 
@@ -724,13 +515,13 @@ mod tests {
     }
 
     #[test]
-    fn insert_optional_header_rejects_empty_or_outer_whitespace() {
+    fn insert_validated_header_rejects_empty_or_outer_whitespace() {
         for value in ["", " text/plain", "text/plain "] {
             let mut headers = HeaderMap::new();
-            let err = insert_optional_header(
+            let err = insert_validated_header(
                 &mut headers,
                 http::header::CONTENT_TYPE,
-                Some(value.to_string()),
+                value,
                 "invalid Content-Type header",
             )
             .expect_err("ambiguous header values must be rejected");
@@ -756,9 +547,7 @@ mod tests {
             .expect("If-None-Match wildcard should be valid");
 
         let mut headers = HeaderMap::new();
-        conditions
-            .apply(&mut headers)
-            .expect("headers should apply");
+        conditions.apply(&mut headers);
 
         assert_eq!(
             headers
@@ -771,41 +560,6 @@ mod tests {
                 .get(http::header::IF_NONE_MATCH)
                 .and_then(|value| value.to_str().ok()),
             Some("*")
-        );
-    }
-
-    #[test]
-    fn put_object_headers_include_conditions_and_metadata() {
-        let mut headers = PutObjectHeaders::default();
-        headers
-            .content_type("text/plain")
-            .expect("content type should be valid");
-        headers
-            .if_none_match("*")
-            .expect("If-None-Match wildcard should be valid");
-        headers
-            .metadata("lease-owner", "client-1")
-            .expect("metadata should be valid");
-
-        let headers = headers.into_header_map().expect("headers should be valid");
-
-        assert_eq!(
-            headers
-                .get(http::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("text/plain")
-        );
-        assert_eq!(
-            headers
-                .get(http::header::IF_NONE_MATCH)
-                .and_then(|value| value.to_str().ok()),
-            Some("*")
-        );
-        assert_eq!(
-            headers
-                .get("x-amz-meta-lease-owner")
-                .and_then(|value| value.to_str().ok()),
-            Some("client-1")
         );
     }
 
@@ -853,15 +607,16 @@ mod tests {
 
     #[cfg(feature = "multipart")]
     #[test]
-    fn prepare_completed_parts_sorts_valid_parts() {
-        let parts = prepare_completed_parts(vec![
-            CompletedPart::new(2, "\"etag-2\"").unwrap(),
-            CompletedPart::new(1, "\"etag-1\"").unwrap(),
-        ])
-        .expect("parts should be valid");
-
-        assert_eq!(parts[0].part_number(), 1);
-        assert_eq!(parts[1].part_number(), 2);
+    fn completed_parts_serialize_in_number_order() {
+        let mut parts = BTreeMap::new();
+        push_completed_part(&mut parts, CompletedPart::new(2, "\"etag-2\"").unwrap()).unwrap();
+        push_completed_part(&mut parts, CompletedPart::new(1, "\"etag-1\"").unwrap()).unwrap();
+        let body = crate::util::xml::encode_complete_multipart_upload(parts.values()).unwrap();
+        let xml = std::str::from_utf8(&body).unwrap();
+        assert!(
+            xml.find("<PartNumber>1</PartNumber>").unwrap()
+                < xml.find("<PartNumber>2</PartNumber>").unwrap()
+        );
     }
 
     #[cfg(feature = "multipart")]
@@ -878,21 +633,15 @@ mod tests {
 
     #[cfg(feature = "multipart")]
     #[test]
-    fn prepare_completed_parts_rejects_empty_or_duplicate_parts() {
-        assert!(prepare_completed_parts(Vec::new()).is_err());
-        assert!(
-            prepare_completed_parts(vec![
-                CompletedPart::new(1, "\"etag-1\"").unwrap(),
-                CompletedPart::new(1, "\"etag-duplicate\"").unwrap(),
-            ])
-            .is_err()
-        );
+    fn complete_multipart_upload_rejects_empty_parts() {
+        let parts = BTreeMap::<u32, CompletedPart>::new();
+        assert!(crate::util::xml::encode_complete_multipart_upload(parts.values()).is_err());
     }
 
     #[cfg(feature = "multipart")]
     #[test]
     fn push_completed_part_rejects_duplicate_and_oversized_batches() {
-        let mut parts = Vec::new();
+        let mut parts = BTreeMap::new();
         push_completed_part(&mut parts, CompletedPart::new(1, "\"etag-1\"").unwrap()).unwrap();
         let err = push_completed_part(
             &mut parts,
@@ -904,7 +653,7 @@ mod tests {
             other => panic!("expected InvalidConfig, got {other:?}"),
         }
 
-        let mut parts = Vec::new();
+        let mut parts = BTreeMap::new();
         for part_number in 1..=MAX_UPLOAD_PART_NUMBER {
             push_completed_part(
                 &mut parts,
@@ -969,109 +718,92 @@ mod tests {
         assert!(validate_subresource("versioning\n").is_err());
     }
 
+    fn metadata_headers(entries: &[(&str, &str)]) -> HeaderMap {
+        let mut metadata = HeaderMap::new();
+        for &(key, value) in entries {
+            push_metadata(&mut metadata, key, value).unwrap();
+        }
+        metadata
+    }
+
     #[test]
     fn apply_metadata_headers_writes_expected_headers() {
         let mut headers = HeaderMap::new();
         apply_metadata_headers(
             &mut headers,
-            vec![
-                ("owner".to_string(), "alice".to_string()),
-                ("trace-id".to_string(), "abc-123".to_string()),
-            ],
+            metadata_headers(&[("owner", "alice"), ("trace-id", "abc-123")]),
         )
         .expect("metadata should map to headers");
-
-        assert_eq!(
-            headers
-                .get("x-amz-meta-owner")
-                .and_then(|v| v.to_str().ok()),
-            Some("alice")
-        );
-        assert_eq!(
-            headers
-                .get("x-amz-meta-trace-id")
-                .and_then(|v| v.to_str().ok()),
-            Some("abc-123")
-        );
+        assert_eq!(headers.get("x-amz-meta-owner").unwrap(), "alice");
+        assert_eq!(headers.get("x-amz-meta-trace-id").unwrap(), "abc-123");
     }
 
     #[test]
-    fn apply_metadata_headers_rejects_duplicate_keys_after_normalization() {
-        let mut headers = HeaderMap::new();
-        let err = apply_metadata_headers(
-            &mut headers,
-            vec![
-                ("Owner".to_string(), "alice".to_string()),
-                ("owner".to_string(), "bob".to_string()),
-            ],
-        )
-        .expect_err("metadata keys normalize to the same header");
-
+    fn push_metadata_rejects_duplicate_keys_after_normalization() {
+        let mut metadata = metadata_headers(&[("Owner", "alice")]);
+        let err = push_metadata(&mut metadata, "owner", "bob")
+            .expect_err("metadata keys normalize to the same header");
         match err {
             Error::InvalidConfig { message } => assert!(message.contains("unique")),
             other => panic!("expected InvalidConfig, got {other:?}"),
         }
-        assert!(headers.is_empty());
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata.get("x-amz-meta-owner").unwrap(), "alice");
     }
 
     #[test]
     fn metadata_values_reject_outer_whitespace_but_allow_empty() {
-        let mut metadata = Vec::new();
+        let mut metadata = HeaderMap::new();
         push_metadata(&mut metadata, "empty", "").expect("empty metadata values are valid");
-        assert_eq!(metadata, vec![("empty".to_string(), String::new())]);
+        assert_eq!(metadata.get("x-amz-meta-empty").unwrap(), "");
 
-        let err = push_metadata(&mut metadata, "bad", " value")
-            .expect_err("metadata value with outer whitespace must be rejected");
-        match err {
-            Error::InvalidConfig { message } => assert!(message.contains("metadata values")),
-            other => panic!("expected InvalidConfig, got {other:?}"),
+        for value in [" value", "value ", "line\nbreak"] {
+            assert!(push_metadata(&mut metadata, "bad", value).is_err());
         }
+        assert_eq!(metadata.len(), 1);
     }
 
     #[test]
-    fn apply_metadata_headers_rejects_existing_header_collision() {
+    fn apply_metadata_headers_rejects_existing_header_collision_atomically() {
         let mut headers = HeaderMap::new();
         headers.insert("x-amz-meta-owner", HeaderValue::from_static("alice"));
-        let err =
-            apply_metadata_headers(&mut headers, vec![("owner".to_string(), "bob".to_string())])
-                .expect_err("metadata must not overwrite existing headers");
-
+        let original = headers.clone();
+        let err = apply_metadata_headers(
+            &mut headers,
+            metadata_headers(&[("color", "blue"), ("owner", "bob")]),
+        )
+        .expect_err("metadata must not overwrite existing headers");
         match err {
             Error::InvalidConfig { message } => assert!(message.contains("unique")),
             other => panic!("expected InvalidConfig, got {other:?}"),
         }
+        assert_eq!(headers, original);
     }
 
     #[test]
     fn copy_metadata_headers_only_replace_when_requested_or_overridden() {
         let mut headers = HeaderMap::new();
-        apply_copy_metadata_headers(&mut headers, false, None, Vec::new())
+        apply_copy_metadata_headers(&mut headers, false, None, HeaderMap::new())
             .expect("empty copy metadata should be valid");
         assert!(!headers.contains_key("x-amz-metadata-directive"));
 
         let mut headers = HeaderMap::new();
-        apply_copy_metadata_headers(&mut headers, true, None, Vec::new())
+        apply_copy_metadata_headers(&mut headers, true, None, HeaderMap::new())
             .expect("explicit metadata replacement should be valid");
-        assert_eq!(
-            headers
-                .get("x-amz-metadata-directive")
-                .and_then(|v| v.to_str().ok()),
-            Some("REPLACE")
-        );
+        assert_eq!(headers.get("x-amz-metadata-directive").unwrap(), "REPLACE");
 
         let mut headers = HeaderMap::new();
         apply_copy_metadata_headers(
             &mut headers,
             false,
-            Some("text/plain".to_string()),
-            Vec::new(),
+            Some(HeaderValue::from_static("text/plain")),
+            HeaderMap::new(),
         )
         .expect("content type override should be valid");
+        assert_eq!(headers.get("x-amz-metadata-directive").unwrap(), "REPLACE");
         assert_eq!(
-            headers
-                .get("x-amz-metadata-directive")
-                .and_then(|v| v.to_str().ok()),
-            Some("REPLACE")
+            headers.get(http::header::CONTENT_TYPE).unwrap(),
+            "text/plain"
         );
 
         let mut headers = HeaderMap::new();
@@ -1079,36 +811,10 @@ mod tests {
             &mut headers,
             false,
             None,
-            vec![("color".to_string(), "blue".to_string())],
+            metadata_headers(&[("color", "blue")]),
         )
         .expect("metadata override should be valid");
-        assert_eq!(
-            headers
-                .get("x-amz-metadata-directive")
-                .and_then(|v| v.to_str().ok()),
-            Some("REPLACE")
-        );
-    }
-
-    #[test]
-    fn parse_xml_or_service_error_maps_request_id_only_error_payload() {
-        let body = "<Error><RequestId>req-only</RequestId></Error>";
-        let err = parse_xml_or_service_error::<()>(
-            http::StatusCode::BAD_REQUEST,
-            &http::HeaderMap::new(),
-            body,
-            |_| Err(Error::decode("failed to parse expected xml", None)),
-        )
-        .expect_err("request-id-only payload should map to API error");
-
-        match err {
-            Error::Api {
-                status, request_id, ..
-            } => {
-                assert_eq!(status, http::StatusCode::BAD_REQUEST);
-                assert_eq!(request_id.as_deref(), Some("req-only"));
-            }
-            other => panic!("expected Api error, got {other:?}"),
-        }
+        assert_eq!(headers.get("x-amz-metadata-directive").unwrap(), "REPLACE");
+        assert_eq!(headers.get("x-amz-meta-color").unwrap(), "blue");
     }
 }

@@ -1,15 +1,17 @@
 use crate::{Error, Result};
 
-pub(crate) fn decode_utf8_response_body(bytes: &[u8]) -> Result<String> {
+pub(crate) fn decode_utf8_response_body(bytes: &[u8]) -> Result<&str> {
     std::str::from_utf8(bytes)
-        .map(str::to_owned)
         .map_err(|e| Error::decode("response body is not valid UTF-8", Some(Box::new(e))))
 }
 
 #[cfg(any(test, feature = "credentials-imds"))]
-pub(crate) fn decode_single_line_response_body(name: &'static str, bytes: &[u8]) -> Result<String> {
+pub(crate) fn decode_single_line_response_body<'a>(
+    name: &'static str,
+    bytes: &'a [u8],
+) -> Result<&'a str> {
     let text = decode_utf8_response_body(bytes)?;
-    let text = strip_trailing_line_ending(&text);
+    let text = strip_trailing_line_ending(text);
     if text.is_empty() {
         return Err(Error::decode(format!("{name} response is empty"), None));
     }
@@ -19,7 +21,7 @@ pub(crate) fn decode_single_line_response_body(name: &'static str, bytes: &[u8])
             None,
         ));
     }
-    Ok(text.to_string())
+    Ok(text)
 }
 
 #[cfg(any(test, feature = "credentials-imds", feature = "credentials-sts"))]
@@ -40,17 +42,7 @@ pub(crate) fn truncate_snippet(body: &str, max_len: usize) -> String {
         return body.to_string();
     }
 
-    let cut = if body.is_char_boundary(max_len) {
-        max_len
-    } else {
-        body.char_indices()
-            .take_while(|(idx, _)| *idx < max_len)
-            .last()
-            .map(|(idx, _)| idx)
-            .unwrap_or(0)
-    };
-
-    let mut out = body[..cut].to_string();
+    let mut out = body[..body.floor_char_boundary(max_len)].to_string();
     out.push_str("...");
     out
 }

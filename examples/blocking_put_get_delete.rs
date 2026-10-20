@@ -8,7 +8,6 @@ use std::{
 use s3::{Auth, BlockingClient};
 
 #[cfg(feature = "blocking")]
-#[allow(clippy::result_large_err)]
 fn main() -> Result<(), s3::Error> {
     let endpoint = match env::var("S3_TEST_ENDPOINT") {
         Ok(v) => v,

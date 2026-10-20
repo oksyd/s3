@@ -1,7 +1,7 @@
 #[cfg(feature = "blocking")]
 use std::sync::Condvar;
 #[cfg(any(feature = "async", feature = "blocking"))]
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 #[cfg(any(feature = "async", feature = "blocking"))]
 use std::time::Duration;
 
@@ -28,9 +28,7 @@ struct CachedState {
 enum RefreshDecision {
     UseCached(CredentialsSnapshot),
     Wait,
-    Refresh {
-        fallback: Option<CredentialsSnapshot>,
-    },
+    Refresh,
 }
 
 /// Cached credentials wrapper with refresh and throttling.
@@ -51,6 +49,37 @@ pub struct CachedProvider<P> {
     condvar: Condvar,
     #[cfg(feature = "async")]
     notify: tokio::sync::Notify,
+}
+
+#[cfg(any(feature = "async", feature = "blocking"))]
+struct RefreshGuard<'a, P: CredentialsProvider> {
+    provider: &'a CachedProvider<P>,
+    active: bool,
+}
+
+#[cfg(any(feature = "async", feature = "blocking"))]
+impl<P: CredentialsProvider> RefreshGuard<'_, P> {
+    fn finish(mut self, refreshed: Result<CredentialsSnapshot>) -> Result<CredentialsSnapshot> {
+        let result = {
+            let mut state = self.provider.lock_state();
+            let result = CachedProvider::<P>::finish_refresh_state(&mut state, refreshed);
+            self.active = false;
+            result
+        };
+        self.provider.notify_refresh_waiters();
+        result
+    }
+}
+
+#[cfg(any(feature = "async", feature = "blocking"))]
+impl<P: CredentialsProvider> Drop for RefreshGuard<'_, P> {
+    fn drop(&mut self) {
+        if self.active {
+            // Cancellation or a provider panic must release the refresh slot.
+            self.provider.lock_state().refreshing = false;
+            self.provider.notify_refresh_waiters();
+        }
+    }
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
@@ -136,10 +165,6 @@ where
             .is_some_and(|expires_at| now >= expires_at)
     }
 
-    fn can_attempt_refresh(&self, state: &CachedState, now: std::time::Instant) -> bool {
-        self.refresh_throttle_remaining(state, now).is_none()
-    }
-
     fn refresh_throttle_remaining(
         &self,
         state: &CachedState,
@@ -176,7 +201,9 @@ where
                 return Ok(RefreshDecision::UseCached(cached.clone()));
             }
 
-            if !force && !Self::is_expired(cached, now_utc) && !self.can_attempt_refresh(state, now)
+            if !force
+                && !Self::is_expired(cached, now_utc)
+                && self.refresh_throttle_remaining(state, now).is_some()
             {
                 return Ok(RefreshDecision::UseCached(cached.clone()));
             }
@@ -199,14 +226,11 @@ where
 
         state.refreshing = true;
         state.last_refresh_attempt = Some(now);
-        Ok(RefreshDecision::Refresh {
-            fallback: state.cached.clone(),
-        })
+        Ok(RefreshDecision::Refresh)
     }
 
     fn finish_refresh_state(
         state: &mut CachedState,
-        fallback: Option<CredentialsSnapshot>,
         refreshed: Result<CredentialsSnapshot>,
     ) -> Result<CredentialsSnapshot> {
         state.refreshing = false;
@@ -221,8 +245,8 @@ where
             Err(err) => err,
         };
 
-        if let Some(snapshot) = fallback.filter(|s| !Self::is_expired(s, now)) {
-            Ok(snapshot)
+        if let Some(snapshot) = state.cached.as_ref().filter(|s| !Self::is_expired(s, now)) {
+            Ok(snapshot.clone())
         } else {
             state.cached = None;
             Err(refresh_error)
@@ -237,21 +261,15 @@ where
         self.condvar.notify_all();
     }
 
-    #[cfg(feature = "blocking")]
-    fn with_blocking_state<R>(&self, f: impl FnOnce(&mut CachedState) -> R) -> R {
-        let mut state = self
-            .state
+    fn lock_state(&self) -> MutexGuard<'_, CachedState> {
+        self.state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        f(&mut state)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[cfg(feature = "blocking")]
     fn wait_for_blocking_refresh(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.lock_state();
         while state.refreshing {
             state = self
                 .condvar
@@ -264,42 +282,27 @@ where
     fn get_blocking(&self, force: bool) -> Result<CredentialsSnapshot> {
         use std::time::Instant;
 
-        enum BlockingDecision {
-            UseCached(CredentialsSnapshot),
-            Wait,
-            Refresh {
-                fallback: Option<CredentialsSnapshot>,
-            },
-        }
-
         loop {
-            let now_utc = OffsetDateTime::now_utc();
-            let decision = self.with_blocking_state(|state| {
-                match self.begin_refresh(state, now_utc, Instant::now(), force) {
-                    Ok(RefreshDecision::UseCached(snapshot)) => {
-                        Ok(BlockingDecision::UseCached(snapshot))
-                    }
-                    Ok(RefreshDecision::Wait) => Ok(BlockingDecision::Wait),
-                    Ok(RefreshDecision::Refresh { fallback }) => {
-                        Ok(BlockingDecision::Refresh { fallback })
-                    }
-                    Err(err) => Err(err),
-                }
-            })?;
+            let decision = self.begin_refresh(
+                &mut self.lock_state(),
+                OffsetDateTime::now_utc(),
+                Instant::now(),
+                force,
+            )?;
 
             match decision {
-                BlockingDecision::UseCached(snapshot) => return Ok(snapshot),
-                BlockingDecision::Wait => {
+                RefreshDecision::UseCached(snapshot) => return Ok(snapshot),
+                RefreshDecision::Wait => {
                     self.wait_for_blocking_refresh();
                     continue;
                 }
-                BlockingDecision::Refresh { fallback } => {
+                RefreshDecision::Refresh => {
+                    let guard = RefreshGuard {
+                        provider: self,
+                        active: true,
+                    };
                     let refreshed = self.inner.credentials_blocking();
-                    let result = self.with_blocking_state(|state| {
-                        Self::finish_refresh_state(state, fallback, refreshed)
-                    });
-                    self.notify_refresh_waiters();
-                    return result;
+                    return guard.finish(refreshed);
                 }
             }
         }
@@ -310,42 +313,26 @@ where
         use std::time::Instant;
 
         loop {
-            let now_utc = OffsetDateTime::now_utc();
-            let mut fallback = None;
-            let notified = {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-                match self.begin_refresh(&mut state, now_utc, Instant::now(), force)? {
-                    RefreshDecision::UseCached(snapshot) => return Ok(snapshot),
-                    RefreshDecision::Wait => Some(self.notify.notified()),
-                    RefreshDecision::Refresh {
-                        fallback: refresh_fallback,
-                    } => {
-                        fallback = refresh_fallback;
-                        None
-                    }
+            // Subscribe before inspecting state so completion cannot be missed.
+            let notified = self.notify.notified();
+            let decision = self.begin_refresh(
+                &mut self.lock_state(),
+                OffsetDateTime::now_utc(),
+                Instant::now(),
+                force,
+            )?;
+            match decision {
+                RefreshDecision::UseCached(snapshot) => return Ok(snapshot),
+                RefreshDecision::Wait => notified.await,
+                RefreshDecision::Refresh => {
+                    let guard = RefreshGuard {
+                        provider: self,
+                        active: true,
+                    };
+                    let refreshed = self.inner.credentials_async().await;
+                    return guard.finish(refreshed);
                 }
-            };
-
-            if let Some(notified) = notified {
-                notified.await;
-                continue;
             }
-
-            let refreshed = self.inner.credentials_async().await;
-
-            let result = {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                Self::finish_refresh_state(&mut state, fallback, refreshed)
-            };
-            self.notify_refresh_waiters();
-            return result;
         }
     }
 }

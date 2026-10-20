@@ -5,7 +5,6 @@ use std::time::Duration;
 use s3::{Auth, BlockingClient, Credentials};
 
 #[cfg(feature = "blocking")]
-#[allow(clippy::result_large_err)]
 fn main() -> Result<(), s3::Error> {
     let creds = Credentials::new("TESTACCESSKEY", "TESTSECRETKEY")?;
 

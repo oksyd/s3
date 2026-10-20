@@ -1,3 +1,4 @@
+use crate::util::validation::validate_object_key;
 use url::{Host, Url};
 
 use crate::{auth::AddressingStyle, error::Error};
@@ -47,17 +48,17 @@ pub(crate) fn resolve_url(
         .host_str()
         .ok_or_else(|| Error::invalid_config("endpoint must include host"))?;
 
-    let resolved_style = resolve_addressing_style(base_url, bucket, addressing);
+    let virtual_hosted = use_virtual_hosted_style(base_url, bucket, addressing);
 
-    let (final_host, raw_path) = match resolved_style {
-        AddressingStyle::Path => {
+    let (final_host, raw_path) = match virtual_hosted {
+        false => {
             let raw_path = match key {
                 Some(key) => format!("/{bucket}/{key}"),
                 None => format!("/{bucket}"),
             };
             (None, raw_path)
         }
-        AddressingStyle::VirtualHosted => {
+        true => {
             if endpoint_has_ip_host(base_url) {
                 return Err(Error::invalid_config(
                     "virtual-hosted-style requires a domain endpoint host",
@@ -73,11 +74,6 @@ pub(crate) fn resolve_url(
                 _ => "/".to_string(),
             };
             (Some(format!("{bucket}.{host}")), raw_path)
-        }
-        AddressingStyle::Auto => {
-            return Err(Error::invalid_config(
-                "internal error: auto addressing style must be resolved",
-            ));
         }
     };
 
@@ -96,27 +92,14 @@ pub(crate) fn resolve_url(
     })
 }
 
-fn resolve_addressing_style(
-    base_url: &Url,
-    bucket: &str,
-    addressing: AddressingStyle,
-) -> AddressingStyle {
+fn use_virtual_hosted_style(base_url: &Url, bucket: &str, addressing: AddressingStyle) -> bool {
     match addressing {
-        AddressingStyle::Path | AddressingStyle::VirtualHosted => addressing,
+        AddressingStyle::Path => false,
+        AddressingStyle::VirtualHosted => true,
         AddressingStyle::Auto => {
-            if endpoint_requires_path_style(base_url) {
-                return AddressingStyle::Path;
-            }
-
-            if base_url.scheme() == "https" && bucket.contains('.') {
-                return AddressingStyle::Path;
-            }
-
-            if !is_dns_compatible_bucket(bucket) {
-                return AddressingStyle::Path;
-            }
-
-            AddressingStyle::VirtualHosted
+            !endpoint_requires_path_style(base_url)
+                && !(base_url.scheme() == "https" && bucket.contains('.'))
+                && is_dns_compatible_bucket(bucket)
         }
     }
 }
@@ -154,10 +137,6 @@ fn validate_bucket_name(bucket: &str) -> Result<(), Error> {
         ));
     }
     Ok(())
-}
-
-pub(crate) fn validate_object_key(key: &str) -> Result<(), Error> {
-    crate::util::validation::validate_object_key(key)
 }
 
 fn is_dns_compatible_bucket(bucket: &str) -> bool {

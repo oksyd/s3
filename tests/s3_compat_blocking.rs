@@ -1,5 +1,4 @@
 #![cfg(feature = "blocking")]
-#![allow(clippy::result_large_err)]
 
 use std::io::Cursor;
 
@@ -21,7 +20,7 @@ use s3::{
 mod common;
 
 fn is_not_found(err: &Error) -> bool {
-    matches!(err, Error::Api { status, .. } if *status == StatusCode::NOT_FOUND)
+    err.status() == Some(StatusCode::NOT_FOUND)
 }
 
 fn is_optional_unsupported(err: &Error) -> bool {
@@ -104,7 +103,7 @@ fn s3_compat_blocking_put_get_delete_roundtrip() -> Result<(), Error> {
 
         match client.objects().get(&bucket, "does-not-exist").send() {
             Ok(_) => panic!("expected not found error"),
-            Err(Error::Api { status, .. }) => assert_eq!(status, StatusCode::NOT_FOUND),
+            Err(Error::Api(error)) => assert_eq!(error.status, StatusCode::NOT_FOUND),
             Err(other) => panic!("expected api error, got {other:?}"),
         }
 
@@ -240,10 +239,12 @@ fn s3_compat_blocking_get_range_and_conditions() -> Result<(), Error> {
                 let got = out.bytes()?;
                 assert_eq!(got, body);
             }
-            Err(Error::Api { status, .. }) if strict => {
+            Err(Error::Api(error)) if strict => {
+                let status = error.status;
                 assert_eq!(status, StatusCode::NOT_MODIFIED)
             }
-            Err(Error::Api { status, .. }) => {
+            Err(Error::Api(error)) => {
+                let status = error.status;
                 assert!(matches!(
                     status,
                     StatusCode::NOT_MODIFIED
@@ -587,7 +588,7 @@ fn s3_compat_blocking_presign_put_head_delete_roundtrip() -> Result<(), Error> {
 
         match client.objects().head(&bucket, key).send() {
             Ok(_) => panic!("expected not found after delete"),
-            Err(Error::Api { status, .. }) => assert_eq!(status, StatusCode::NOT_FOUND),
+            Err(Error::Api(error)) => assert_eq!(error.status, StatusCode::NOT_FOUND),
             Err(other) => panic!("expected api error, got {other:?}"),
         }
 
@@ -666,8 +667,8 @@ fn s3_compat_blocking_multipart_put_get_roundtrip() -> Result<(), Error> {
         client
             .objects()
             .complete_multipart_upload(&bucket, key, &upload_id)
-            .part(1, etag1)?
             .part(2, etag2)?
+            .part(1, etag1)?
             .send()?;
 
         let got = client.objects().get(&bucket, key).send()?.bytes()?;
@@ -771,7 +772,8 @@ fn s3_compat_blocking_multipart_abort_roundtrip() -> Result<(), Error> {
 
         match client.objects().list_parts(&bucket, key, &upload_id).send() {
             Ok(_) => panic!("expected error after abort"),
-            Err(Error::Api { status, .. }) => {
+            Err(Error::Api(error)) => {
+                let status = error.status;
                 assert!(matches!(
                     status,
                     StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST

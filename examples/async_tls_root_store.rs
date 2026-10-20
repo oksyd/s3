@@ -2,23 +2,22 @@
 use std::env;
 
 #[cfg(feature = "async")]
-use s3::{AsyncTlsRootStore, Auth, Client};
+use s3::{Auth, Client, TlsRootStore};
 
 #[cfg(feature = "async")]
-fn tls_root_store_from_env() -> AsyncTlsRootStore {
+fn tls_root_store_from_env() -> TlsRootStore {
     match env::var("S3_TLS_ROOT_STORE")
         .unwrap_or_default()
         .to_ascii_lowercase()
         .as_str()
     {
-        "webpki" => AsyncTlsRootStore::WebPki,
-        "system" => AsyncTlsRootStore::System,
-        _ => AsyncTlsRootStore::BackendDefault,
+        "webpki" => TlsRootStore::WebPki,
+        "system" => TlsRootStore::System,
+        _ => TlsRootStore::BackendDefault,
     }
 }
 
 #[cfg(feature = "async")]
-#[allow(clippy::result_large_err)]
 #[tokio::main]
 async fn main() -> Result<(), s3::Error> {
     let endpoint = match env::var("S3_TEST_ENDPOINT") {

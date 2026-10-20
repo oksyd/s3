@@ -3,22 +3,22 @@
 use std::io::Read;
 use std::time::Duration;
 
-use bytes::Bytes;
-use http::{HeaderMap, HeaderValue, Method, StatusCode};
+#[cfg(feature = "multipart")]
+use std::collections::BTreeMap;
 
-use super::blocking_common::{parse_blocking_xml_response, read_response_error};
-#[cfg(test)]
-use super::common::parse_xml_or_service_error;
+use bytes::Bytes;
+use http::{HeaderMap, HeaderValue, Method};
+
 use super::common::{
-    ByteRange, ObjectConditions, PutObjectHeaders, apply_copy_metadata_headers,
-    apply_metadata_headers, insert_header, insert_optional_header, next_list_v2_continuation_token,
-    push_delete_object, push_metadata, validate_content_length_matches_body, validate_header_value,
-    validate_max_keys, validate_query_token, validate_query_value, xml_body_headers,
+    ByteRange, ObjectConditions, apply_copy_metadata_headers, apply_metadata_headers,
+    insert_header, insert_validated_header, next_list_v2_continuation_token, parse_xml_response,
+    push_delete_object, push_metadata, validate_content_length_matches_body, validate_max_keys,
+    validate_query_token, validate_query_value, validated_header_value, xml_body_headers,
 };
 #[cfg(feature = "multipart")]
 use super::common::{
-    prepare_completed_parts, push_completed_part, validate_max_parts, validate_part_number_marker,
-    validate_upload_id, validate_upload_part_number,
+    push_completed_part, validate_max_parts, validate_part_number_marker, validate_upload_id,
+    validate_upload_part_number,
 };
 
 use crate::{
@@ -26,18 +26,15 @@ use crate::{
     error::{Error, Result},
     transport::blocking_transport::BlockingBody,
     types::{
-        BlockingByteStream, BlockingGetObjectOutput, CopyObjectOutput, DeleteObjectIdentifier,
-        DeleteObjectOutput, DeleteObjectsOutput, HeadObjectOutput, ListObjectsV2Output,
-        PresignedRequest, PutObjectOutput,
+        BlockingGetObjectOutput, CopyObjectOutput, DeleteObjectIdentifier, DeleteObjectsOutput,
+        HeadObjectOutput, ListObjectsV2Output, PresignedRequest, PutObjectOutput,
     },
 };
 
-const MAX_ERROR_RESPONSE_BODY_BYTES: usize = 256 * 1024;
-
 #[cfg(feature = "multipart")]
 use crate::types::{
-    AbortMultipartUploadOutput, CompleteMultipartUploadOutput, CompletedPart,
-    CreateMultipartUploadOutput, ListPartsOutput, UploadPartCopyOutput, UploadPartOutput,
+    CompleteMultipartUploadOutput, CompletedPart, CreateMultipartUploadOutput, ListPartsOutput,
+    UploadPartCopyOutput, UploadPartOutput,
 };
 
 /// Object operations service (blocking).
@@ -101,7 +98,7 @@ impl BlockingObjectsService {
             client: self.client.clone(),
             bucket: bucket.into(),
             key: key.into(),
-            headers: PutObjectHeaders::default(),
+            headers: HeaderMap::new(),
             content_length: None,
             #[cfg(feature = "checksums")]
             checksum: None,
@@ -148,7 +145,7 @@ impl BlockingObjectsService {
             destination_bucket: destination_bucket.into(),
             destination_key: destination_key.into(),
             replace_metadata: false,
-            metadata: Vec::new(),
+            metadata: HeaderMap::new(),
             content_type: None,
         }
     }
@@ -165,7 +162,7 @@ impl BlockingObjectsService {
             bucket: bucket.into(),
             key: key.into(),
             content_type: None,
-            metadata: Vec::new(),
+            metadata: HeaderMap::new(),
         }
     }
 
@@ -225,7 +222,7 @@ impl BlockingObjectsService {
             bucket: bucket.into(),
             key: key.into(),
             upload_id: upload_id.into(),
-            parts: Vec::new(),
+            parts: BTreeMap::new(),
         }
     }
 
@@ -291,7 +288,7 @@ impl BlockingObjectsService {
             expires_in: Duration::from_secs(900),
             query_params: Vec::new(),
             headers: HeaderMap::new(),
-            metadata: Vec::new(),
+            metadata: HeaderMap::new(),
         }
     }
 
@@ -300,16 +297,8 @@ impl BlockingObjectsService {
         &self,
         bucket: impl Into<String>,
         key: impl Into<String>,
-    ) -> BlockingPresignGetObjectRequest {
-        BlockingPresignGetObjectRequest {
-            client: self.client.clone(),
-            bucket: bucket.into(),
-            key: key.into(),
-            expires_in: Duration::from_secs(900),
-            query_params: Vec::new(),
-            headers: HeaderMap::new(),
-            metadata: Vec::new(),
-        }
+    ) -> BlockingPresignObjectRequest {
+        self.presign(Method::GET, bucket, key)
     }
 
     /// Starts a presigned PUT request builder.
@@ -317,16 +306,8 @@ impl BlockingObjectsService {
         &self,
         bucket: impl Into<String>,
         key: impl Into<String>,
-    ) -> BlockingPresignPutObjectRequest {
-        BlockingPresignPutObjectRequest {
-            client: self.client.clone(),
-            bucket: bucket.into(),
-            key: key.into(),
-            expires_in: Duration::from_secs(900),
-            query_params: Vec::new(),
-            headers: HeaderMap::new(),
-            metadata: Vec::new(),
-        }
+    ) -> BlockingPresignObjectRequest {
+        self.presign(Method::PUT, bucket, key)
     }
 
     /// Starts a presigned HEAD request builder.
@@ -334,15 +315,8 @@ impl BlockingObjectsService {
         &self,
         bucket: impl Into<String>,
         key: impl Into<String>,
-    ) -> BlockingPresignHeadObjectRequest {
-        BlockingPresignHeadObjectRequest {
-            client: self.client.clone(),
-            bucket: bucket.into(),
-            key: key.into(),
-            expires_in: Duration::from_secs(900),
-            query_params: Vec::new(),
-            headers: HeaderMap::new(),
-        }
+    ) -> BlockingPresignObjectRequest {
+        self.presign(Method::HEAD, bucket, key)
     }
 
     /// Starts a presigned DELETE request builder.
@@ -350,15 +324,8 @@ impl BlockingObjectsService {
         &self,
         bucket: impl Into<String>,
         key: impl Into<String>,
-    ) -> BlockingPresignDeleteObjectRequest {
-        BlockingPresignDeleteObjectRequest {
-            client: self.client.clone(),
-            bucket: bucket.into(),
-            key: key.into(),
-            expires_in: Duration::from_secs(900),
-            query_params: Vec::new(),
-            headers: HeaderMap::new(),
-        }
+    ) -> BlockingPresignObjectRequest {
+        self.presign(Method::DELETE, bucket, key)
     }
 }
 
@@ -392,8 +359,8 @@ pub struct BlockingGetObjectRequest {
     key: String,
     range: Option<ByteRange>,
     conditions: ObjectConditions,
-    if_modified_since: Option<String>,
-    if_unmodified_since: Option<String>,
+    if_modified_since: Option<HeaderValue>,
+    if_unmodified_since: Option<HeaderValue>,
 }
 
 impl BlockingGetObjectRequest {
@@ -417,17 +384,19 @@ impl BlockingGetObjectRequest {
 
     /// Adds an If-Modified-Since condition.
     pub fn if_modified_since(mut self, value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        validate_header_value(&value, "invalid If-Modified-Since header")?;
-        self.if_modified_since = Some(value);
+        self.if_modified_since = Some(validated_header_value(
+            &value.into(),
+            "invalid If-Modified-Since header",
+        )?);
         Ok(self)
     }
 
     /// Adds an If-Unmodified-Since condition.
     pub fn if_unmodified_since(mut self, value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        validate_header_value(&value, "invalid If-Unmodified-Since header")?;
-        self.if_unmodified_since = Some(value);
+        self.if_unmodified_since = Some(validated_header_value(
+            &value.into(),
+            "invalid If-Unmodified-Since header",
+        )?);
         Ok(self)
     }
 
@@ -440,19 +409,13 @@ impl BlockingGetObjectRequest {
                 range.header_value("invalid Range header")?,
             );
         }
-        self.conditions.apply(&mut headers)?;
-        insert_optional_header(
-            &mut headers,
-            http::header::IF_MODIFIED_SINCE,
-            self.if_modified_since,
-            "invalid If-Modified-Since header",
-        )?;
-        insert_optional_header(
-            &mut headers,
-            http::header::IF_UNMODIFIED_SINCE,
-            self.if_unmodified_since,
-            "invalid If-Unmodified-Since header",
-        )?;
+        self.conditions.apply(&mut headers);
+        if let Some(value) = self.if_modified_since {
+            headers.insert(http::header::IF_MODIFIED_SINCE, value);
+        }
+        if let Some(value) = self.if_unmodified_since {
+            headers.insert(http::header::IF_UNMODIFIED_SINCE, value);
+        }
 
         let resp = self.client.execute_stream(
             Method::GET,
@@ -463,17 +426,6 @@ impl BlockingGetObjectRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            let resp = resp
-                .into_response_limited(MAX_ERROR_RESPONSE_BODY_BYTES)
-                .map_err(|e| Error::transport("failed to read response body", Some(Box::new(e))))?;
-            return Err(crate::transport::response_error_from_body(
-                resp.status(),
-                resp.headers(),
-                resp.body(),
-            ));
-        }
-
         let etag = crate::util::headers::header_string(resp.headers(), http::header::ETAG);
         let content_length =
             crate::util::headers::header_u64(resp.headers(), http::header::CONTENT_LENGTH);
@@ -481,7 +433,7 @@ impl BlockingGetObjectRequest {
             crate::util::headers::header_string(resp.headers(), http::header::CONTENT_TYPE);
 
         Ok(BlockingGetObjectOutput {
-            body: BlockingByteStream::new(resp),
+            body: Box::new(resp),
             etag,
             content_length,
             content_type,
@@ -507,10 +459,6 @@ impl BlockingHeadObjectRequest {
             HeaderMap::new(),
             BlockingBody::Empty,
         )?;
-
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
 
         Ok(HeadObjectOutput {
             etag: crate::util::headers::header_string(resp.headers(), http::header::ETAG),
@@ -555,7 +503,7 @@ pub struct BlockingPutObjectRequest {
     client: BlockingClient,
     bucket: String,
     key: String,
-    headers: PutObjectHeaders,
+    headers: HeaderMap,
     content_length: Option<u64>,
     #[cfg(feature = "checksums")]
     checksum: Option<crate::types::Checksum>,
@@ -565,43 +513,78 @@ pub struct BlockingPutObjectRequest {
 impl BlockingPutObjectRequest {
     /// Sets the Content-Type header.
     pub fn content_type(mut self, value: impl Into<String>) -> Result<Self> {
-        self.headers.content_type(value)?;
+        insert_validated_header(
+            &mut self.headers,
+            http::header::CONTENT_TYPE,
+            value.into(),
+            "invalid Content-Type header",
+        )?;
         Ok(self)
     }
 
     /// Sets the Cache-Control header.
     pub fn cache_control(mut self, value: impl Into<String>) -> Result<Self> {
-        self.headers.cache_control(value)?;
+        insert_validated_header(
+            &mut self.headers,
+            http::header::CACHE_CONTROL,
+            value.into(),
+            "invalid Cache-Control header",
+        )?;
         Ok(self)
     }
 
     /// Sets the Content-Disposition header.
     pub fn content_disposition(mut self, value: impl Into<String>) -> Result<Self> {
-        self.headers.content_disposition(value)?;
+        insert_validated_header(
+            &mut self.headers,
+            http::header::CONTENT_DISPOSITION,
+            value.into(),
+            "invalid Content-Disposition header",
+        )?;
         Ok(self)
     }
 
     /// Sets the Content-Encoding header.
     pub fn content_encoding(mut self, value: impl Into<String>) -> Result<Self> {
-        self.headers.content_encoding(value)?;
+        insert_validated_header(
+            &mut self.headers,
+            http::header::CONTENT_ENCODING,
+            value.into(),
+            "invalid Content-Encoding header",
+        )?;
         Ok(self)
     }
 
     /// Sets the Content-Language header.
     pub fn content_language(mut self, value: impl Into<String>) -> Result<Self> {
-        self.headers.content_language(value)?;
+        insert_validated_header(
+            &mut self.headers,
+            http::header::CONTENT_LANGUAGE,
+            value.into(),
+            "invalid Content-Language header",
+        )?;
         Ok(self)
     }
 
     /// Sets the Expires header.
     pub fn expires(mut self, value: impl Into<String>) -> Result<Self> {
-        self.headers.expires(value)?;
+        insert_validated_header(
+            &mut self.headers,
+            http::header::EXPIRES,
+            value.into(),
+            "invalid Expires header",
+        )?;
         Ok(self)
     }
 
     /// Adds an If-Match precondition.
     pub fn if_match(mut self, value: impl Into<String>) -> Result<Self> {
-        self.headers.if_match(value)?;
+        insert_validated_header(
+            &mut self.headers,
+            http::header::IF_MATCH,
+            value.into(),
+            "invalid If-Match header",
+        )?;
         Ok(self)
     }
 
@@ -609,7 +592,12 @@ impl BlockingPutObjectRequest {
     ///
     /// Use `*` for create-if-absent writes.
     pub fn if_none_match(mut self, value: impl Into<String>) -> Result<Self> {
-        self.headers.if_none_match(value)?;
+        insert_validated_header(
+            &mut self.headers,
+            http::header::IF_NONE_MATCH,
+            value.into(),
+            "invalid If-None-Match header",
+        )?;
         Ok(self)
     }
 
@@ -621,7 +609,7 @@ impl BlockingPutObjectRequest {
 
     /// Adds a user metadata entry.
     pub fn metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Result<Self> {
-        self.headers.metadata(key, value)?;
+        push_metadata(&mut self.headers, key, value)?;
         Ok(self)
     }
 
@@ -643,8 +631,8 @@ impl BlockingPutObjectRequest {
     where
         R: Read + Send + 'static,
     {
-        self.body = BlockingBody::Reader {
-            reader: Box::new(reader),
+        self.body = BlockingBody::Stream {
+            stream: Box::new(reader),
             content_length: None,
         };
         self
@@ -661,7 +649,7 @@ impl BlockingPutObjectRequest {
 
     /// Sends the request.
     pub fn send(self) -> Result<PutObjectOutput> {
-        let headers = self.headers.into_header_map()?;
+        let headers = self.headers;
 
         #[cfg(feature = "checksums")]
         let headers = {
@@ -685,12 +673,12 @@ impl BlockingPutObjectRequest {
                 )?;
                 BlockingBody::Bytes(bytes)
             }
-            BlockingBody::Reader { reader, .. } => {
+            BlockingBody::Stream { stream: reader, .. } => {
                 let content_length = self
                     .content_length
                     .ok_or_else(|| Error::invalid_config("reader put requires content_length"))?;
-                BlockingBody::Reader {
-                    reader,
+                BlockingBody::Stream {
+                    stream: reader,
                     content_length: Some(content_length),
                 }
             }
@@ -704,10 +692,6 @@ impl BlockingPutObjectRequest {
             headers,
             body,
         )?;
-
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
 
         Ok(PutObjectOutput {
             etag: crate::util::headers::header_string(resp.headers(), http::header::ETAG),
@@ -724,8 +708,8 @@ pub struct BlockingDeleteObjectRequest {
 
 impl BlockingDeleteObjectRequest {
     /// Sends the request.
-    pub fn send(self) -> Result<DeleteObjectOutput> {
-        let resp = self.client.execute(
+    pub fn send(self) -> Result<()> {
+        self.client.execute(
             Method::DELETE,
             Some(&self.bucket),
             Some(&self.key),
@@ -734,11 +718,7 @@ impl BlockingDeleteObjectRequest {
             BlockingBody::Empty,
         )?;
 
-        let status = resp.status();
-        if status == StatusCode::NO_CONTENT || status.is_success() {
-            return Ok(DeleteObjectOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -800,11 +780,7 @@ impl BlockingDeleteObjectsRequest {
             BlockingBody::Bytes(body),
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_delete_objects)
+        parse_xml_response(resp, crate::util::xml::parse_delete_objects)
     }
 }
 
@@ -817,8 +793,8 @@ pub struct BlockingCopyObjectRequest {
     destination_bucket: String,
     destination_key: String,
     replace_metadata: bool,
-    metadata: Vec<(String, String)>,
-    content_type: Option<String>,
+    metadata: HeaderMap,
+    content_type: Option<HeaderValue>,
 }
 
 impl BlockingCopyObjectRequest {
@@ -844,9 +820,10 @@ impl BlockingCopyObjectRequest {
 
     /// Sets the Content-Type for the destination object.
     pub fn content_type(mut self, value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        validate_header_value(&value, "invalid Content-Type header")?;
-        self.content_type = Some(value);
+        self.content_type = Some(validated_header_value(
+            &value.into(),
+            "invalid Content-Type header",
+        )?);
         Ok(self)
     }
 
@@ -882,11 +859,7 @@ impl BlockingCopyObjectRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_copy_object)
+        parse_xml_response(resp, crate::util::xml::parse_copy_object)
     }
 }
 
@@ -896,17 +869,18 @@ pub struct BlockingCreateMultipartUploadRequest {
     client: BlockingClient,
     bucket: String,
     key: String,
-    content_type: Option<String>,
-    metadata: Vec<(String, String)>,
+    content_type: Option<HeaderValue>,
+    metadata: HeaderMap,
 }
 
 #[cfg(feature = "multipart")]
 impl BlockingCreateMultipartUploadRequest {
     /// Sets the Content-Type header.
     pub fn content_type(mut self, value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        validate_header_value(&value, "invalid Content-Type header")?;
-        self.content_type = Some(value);
+        self.content_type = Some(validated_header_value(
+            &value.into(),
+            "invalid Content-Type header",
+        )?);
         Ok(self)
     }
 
@@ -919,12 +893,9 @@ impl BlockingCreateMultipartUploadRequest {
     /// Sends the request.
     pub fn send(self) -> Result<CreateMultipartUploadOutput> {
         let mut headers = HeaderMap::new();
-        insert_optional_header(
-            &mut headers,
-            http::header::CONTENT_TYPE,
-            self.content_type,
-            "invalid Content-Type header",
-        )?;
+        if let Some(value) = self.content_type {
+            headers.insert(http::header::CONTENT_TYPE, value);
+        }
 
         apply_metadata_headers(&mut headers, self.metadata)?;
 
@@ -937,11 +908,7 @@ impl BlockingCreateMultipartUploadRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_create_multipart_upload)
+        parse_xml_response(resp, crate::util::xml::parse_create_multipart_upload)
     }
 }
 
@@ -969,8 +936,8 @@ impl BlockingUploadPartRequest {
     where
         R: Read + Send + 'static,
     {
-        self.body = BlockingBody::Reader {
-            reader: Box::new(reader),
+        self.body = BlockingBody::Stream {
+            stream: Box::new(reader),
             content_length: Some(content_length),
         };
         self
@@ -996,10 +963,6 @@ impl BlockingUploadPartRequest {
             self.body,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
         Ok(UploadPartOutput {
             etag: crate::util::headers::header_string(resp.headers(), http::header::ETAG),
         })
@@ -1012,7 +975,7 @@ fn validate_upload_part_body(body: &BlockingBody) -> Result<()> {
         BlockingBody::Empty => {
             return Err(Error::invalid_config("upload_part requires a request body"));
         }
-        BlockingBody::Reader {
+        BlockingBody::Stream {
             content_length: None,
             ..
         } => {
@@ -1021,7 +984,7 @@ fn validate_upload_part_body(body: &BlockingBody) -> Result<()> {
             ));
         }
         BlockingBody::Bytes(_)
-        | BlockingBody::Reader {
+        | BlockingBody::Stream {
             content_length: Some(_),
             ..
         } => {}
@@ -1099,11 +1062,7 @@ impl BlockingUploadPartCopyRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_upload_part_copy)
+        parse_xml_response(resp, crate::util::xml::parse_upload_part_copy)
     }
 }
 
@@ -1114,7 +1073,7 @@ pub struct BlockingCompleteMultipartUploadRequest {
     bucket: String,
     key: String,
     upload_id: String,
-    parts: Vec<CompletedPart>,
+    parts: BTreeMap<u32, CompletedPart>,
 }
 
 #[cfg(feature = "multipart")]
@@ -1139,8 +1098,7 @@ impl BlockingCompleteMultipartUploadRequest {
     /// Sends the request.
     pub fn send(self) -> Result<CompleteMultipartUploadOutput> {
         validate_upload_id(&self.upload_id)?;
-        let parts = prepare_completed_parts(self.parts)?;
-        let body = crate::util::xml::encode_complete_multipart_upload(&parts)?;
+        let body = crate::util::xml::encode_complete_multipart_upload(self.parts.values())?;
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::CONTENT_TYPE,
@@ -1156,11 +1114,7 @@ impl BlockingCompleteMultipartUploadRequest {
             BlockingBody::Bytes(body),
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_complete_multipart_upload)
+        parse_xml_response(resp, crate::util::xml::parse_complete_multipart_upload)
     }
 }
 
@@ -1176,10 +1130,10 @@ pub struct BlockingAbortMultipartUploadRequest {
 #[cfg(feature = "multipart")]
 impl BlockingAbortMultipartUploadRequest {
     /// Sends the request.
-    pub fn send(self) -> Result<AbortMultipartUploadOutput> {
+    pub fn send(self) -> Result<()> {
         validate_upload_id(&self.upload_id)?;
 
-        let resp = self.client.execute(
+        self.client.execute(
             Method::DELETE,
             Some(&self.bucket),
             Some(&self.key),
@@ -1188,10 +1142,7 @@ impl BlockingAbortMultipartUploadRequest {
             BlockingBody::Empty,
         )?;
 
-        if resp.status() == StatusCode::NO_CONTENT || resp.status().is_success() {
-            return Ok(AbortMultipartUploadOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -1228,11 +1179,9 @@ impl BlockingListPartsRequest {
 
         let mut query = vec![("uploadId".to_string(), self.upload_id)];
         if let Some(v) = self.max_parts {
-            validate_max_parts(v)?;
             query.push(("max-parts".to_string(), v.to_string()));
         }
         if let Some(v) = self.part_number_marker {
-            validate_part_number_marker(v)?;
             query.push(("part-number-marker".to_string(), v.to_string()));
         }
 
@@ -1245,11 +1194,7 @@ impl BlockingListPartsRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_list_parts)
+        parse_xml_response(resp, crate::util::xml::parse_list_parts)
     }
 }
 
@@ -1278,6 +1223,7 @@ impl BlockingListPartsRequest {
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct BlockingListObjectsV2Request {
     client: BlockingClient,
     bucket: String,
@@ -1331,13 +1277,7 @@ impl BlockingListObjectsV2Request {
     /// Converts this request into a pager.
     pub fn pager(self) -> BlockingListObjectsV2Pager {
         BlockingListObjectsV2Pager {
-            client: self.client,
-            bucket: self.bucket,
-            prefix: self.prefix,
-            delimiter: self.delimiter,
-            continuation_token: self.continuation_token,
-            start_after: self.start_after,
-            max_keys: self.max_keys,
+            request: self,
             done: false,
         }
     }
@@ -1347,23 +1287,18 @@ impl BlockingListObjectsV2Request {
         let mut query = Vec::new();
         query.push(("list-type".to_string(), "2".to_string()));
         if let Some(v) = self.prefix {
-            validate_query_value("prefix", &v)?;
             query.push(("prefix".to_string(), v));
         }
         if let Some(v) = self.delimiter {
-            validate_query_value("delimiter", &v)?;
             query.push(("delimiter".to_string(), v));
         }
         if let Some(v) = self.continuation_token {
-            validate_query_token("continuation_token", &v)?;
             query.push(("continuation-token".to_string(), v));
         }
         if let Some(v) = self.start_after {
-            crate::util::url::validate_object_key(&v)?;
             query.push(("start-after".to_string(), v));
         }
         if let Some(v) = self.max_keys {
-            validate_max_keys(v)?;
             query.push(("max-keys".to_string(), v.to_string()));
         }
 
@@ -1376,23 +1311,13 @@ impl BlockingListObjectsV2Request {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_list_objects_v2)
+        parse_xml_response(resp, crate::util::xml::parse_list_objects_v2)
     }
 }
 
 /// Pager for ListObjectsV2 responses.
 pub struct BlockingListObjectsV2Pager {
-    client: BlockingClient,
-    bucket: String,
-    prefix: Option<String>,
-    delimiter: Option<String>,
-    continuation_token: Option<String>,
-    start_after: Option<String>,
-    max_keys: Option<u32>,
+    request: BlockingListObjectsV2Request,
     done: bool,
 }
 
@@ -1404,34 +1329,22 @@ impl Iterator for BlockingListObjectsV2Pager {
             return None;
         }
 
-        let start_after = if self.continuation_token.is_some() {
-            None
-        } else {
-            self.start_after.clone()
-        };
-
-        let page = BlockingListObjectsV2Request {
-            client: self.client.clone(),
-            bucket: self.bucket.clone(),
-            prefix: self.prefix.clone(),
-            delimiter: self.delimiter.clone(),
-            continuation_token: self.continuation_token.clone(),
-            start_after,
-            max_keys: self.max_keys,
+        if self.request.continuation_token.is_some() {
+            self.request.start_after = None;
         }
-        .send();
+        let page = self.request.clone().send();
 
         match page {
             Ok(page) => {
                 let next = next_list_v2_continuation_token(
-                    self.continuation_token.as_deref(),
+                    self.request.continuation_token.as_deref(),
                     page.next_continuation_token.as_deref(),
                     page.is_truncated,
                 );
                 match next {
                     Ok(next) => {
-                        self.continuation_token = next;
-                        if self.continuation_token.is_none() {
+                        self.request.continuation_token = next;
+                        if self.request.continuation_token.is_none() {
                             self.done = true;
                         }
                         Some(Ok(page))
@@ -1456,11 +1369,37 @@ impl BlockingListObjectsV2Pager {
     /// Returns `None` if [`BlockingListObjectsV2Request::max_keys`] was not set. This
     /// limit does not indicate how many pages remain.
     pub fn max_keys(&self) -> Option<u32> {
-        self.max_keys
+        self.request.max_keys
     }
 }
 
-/// Request builder for presigned requests with a custom method.
+/// Request builder for presigned object requests.
+///
+/// Created by [`BlockingObjectsService::presign`] or the `presign_get`, `presign_put`,
+/// `presign_head`, and `presign_delete` convenience methods.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn demo() -> Result<(), s3::Error> {
+/// use std::time::Duration;
+///
+/// use s3::{Auth, BlockingClient};
+///
+/// let client = BlockingClient::builder("https://s3.example.com")?
+///     .region("us-east-1")
+///     .auth(Auth::from_env()?)
+///     .build()?;
+///
+/// let presigned = client
+///     .objects()
+///     .presign_get("my-bucket", "reports/q1.csv")
+///     .expires_in(Duration::from_secs(300))?
+///     .build()?;
+/// # let _ = presigned;
+/// # Ok(())
+/// # }
+/// ```
 pub struct BlockingPresignObjectRequest {
     client: BlockingClient,
     method: Method,
@@ -1469,7 +1408,7 @@ pub struct BlockingPresignObjectRequest {
     expires_in: Duration,
     query_params: Vec<(String, String)>,
     headers: HeaderMap,
-    metadata: Vec<(String, String)>,
+    metadata: HeaderMap,
 }
 
 impl BlockingPresignObjectRequest {
@@ -1522,255 +1461,6 @@ impl BlockingPresignObjectRequest {
     }
 }
 
-/// Request builder for presigned GET requests.
-///
-/// Created by [`BlockingObjectsService::presign_get`](crate::api::BlockingObjectsService::presign_get).
-///
-/// # Example
-///
-/// ```no_run
-/// # fn demo() -> Result<(), s3::Error> {
-/// use std::time::Duration;
-///
-/// use s3::{Auth, BlockingClient};
-///
-/// let client = BlockingClient::builder("https://s3.example.com")?
-///     .region("us-east-1")
-///     .auth(Auth::from_env()?)
-///     .build()?;
-///
-/// let presigned = client
-///     .objects()
-///     .presign_get("my-bucket", "reports/q1.csv")
-///     .expires_in(Duration::from_secs(300))?
-///     .build()?;
-/// # let _ = presigned;
-/// # Ok(())
-/// # }
-/// ```
-pub struct BlockingPresignGetObjectRequest {
-    client: BlockingClient,
-    bucket: String,
-    key: String,
-    expires_in: Duration,
-    query_params: Vec<(String, String)>,
-    headers: HeaderMap,
-    metadata: Vec<(String, String)>,
-}
-
-impl BlockingPresignGetObjectRequest {
-    /// Sets the expiry duration.
-    pub fn expires_in(mut self, duration: Duration) -> Result<Self> {
-        crate::util::signing::validate_presign_expires(duration)?;
-        self.expires_in = duration;
-        Ok(self)
-    }
-
-    /// Adds a query parameter to the presigned URL.
-    pub fn query_param(
-        mut self,
-        name: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Result<Self> {
-        let name = name.into();
-        let value = value.into();
-        crate::util::signing::validate_presign_query_param(&name, &value)?;
-        self.query_params.push((name, value));
-        Ok(self)
-    }
-
-    /// Adds an HTTP header to sign.
-    pub fn header(mut self, name: http::header::HeaderName, value: HeaderValue) -> Result<Self> {
-        crate::util::signing::validate_presign_header(&name, &value)?;
-        self.headers.insert(name, value);
-        Ok(self)
-    }
-
-    /// Adds a user metadata entry to sign.
-    pub fn metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Result<Self> {
-        push_metadata(&mut self.metadata, key, value)?;
-        Ok(self)
-    }
-
-    /// Builds the presigned request.
-    pub fn build(self) -> Result<PresignedRequest> {
-        let mut headers = self.headers;
-        apply_metadata_headers(&mut headers, self.metadata)?;
-
-        self.client.presign(
-            Method::GET,
-            &self.bucket,
-            &self.key,
-            self.expires_in,
-            self.query_params,
-            headers,
-        )
-    }
-}
-
-/// Request builder for presigned PUT requests.
-pub struct BlockingPresignPutObjectRequest {
-    client: BlockingClient,
-    bucket: String,
-    key: String,
-    expires_in: Duration,
-    query_params: Vec<(String, String)>,
-    headers: HeaderMap,
-    metadata: Vec<(String, String)>,
-}
-
-impl BlockingPresignPutObjectRequest {
-    /// Sets the expiry duration.
-    pub fn expires_in(mut self, duration: Duration) -> Result<Self> {
-        crate::util::signing::validate_presign_expires(duration)?;
-        self.expires_in = duration;
-        Ok(self)
-    }
-
-    /// Adds a query parameter to the presigned URL.
-    pub fn query_param(
-        mut self,
-        name: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Result<Self> {
-        let name = name.into();
-        let value = value.into();
-        crate::util::signing::validate_presign_query_param(&name, &value)?;
-        self.query_params.push((name, value));
-        Ok(self)
-    }
-
-    /// Adds an HTTP header to sign.
-    pub fn header(mut self, name: http::header::HeaderName, value: HeaderValue) -> Result<Self> {
-        crate::util::signing::validate_presign_header(&name, &value)?;
-        self.headers.insert(name, value);
-        Ok(self)
-    }
-
-    /// Adds a user metadata entry to sign.
-    pub fn metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Result<Self> {
-        push_metadata(&mut self.metadata, key, value)?;
-        Ok(self)
-    }
-
-    /// Builds the presigned request.
-    pub fn build(self) -> Result<PresignedRequest> {
-        let mut headers = self.headers;
-        apply_metadata_headers(&mut headers, self.metadata)?;
-
-        self.client.presign(
-            Method::PUT,
-            &self.bucket,
-            &self.key,
-            self.expires_in,
-            self.query_params,
-            headers,
-        )
-    }
-}
-
-/// Request builder for presigned HEAD requests.
-pub struct BlockingPresignHeadObjectRequest {
-    client: BlockingClient,
-    bucket: String,
-    key: String,
-    expires_in: Duration,
-    query_params: Vec<(String, String)>,
-    headers: HeaderMap,
-}
-
-impl BlockingPresignHeadObjectRequest {
-    /// Sets the expiry duration.
-    pub fn expires_in(mut self, duration: Duration) -> Result<Self> {
-        crate::util::signing::validate_presign_expires(duration)?;
-        self.expires_in = duration;
-        Ok(self)
-    }
-
-    /// Adds a query parameter to the presigned URL.
-    pub fn query_param(
-        mut self,
-        name: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Result<Self> {
-        let name = name.into();
-        let value = value.into();
-        crate::util::signing::validate_presign_query_param(&name, &value)?;
-        self.query_params.push((name, value));
-        Ok(self)
-    }
-
-    /// Adds an HTTP header to sign.
-    pub fn header(mut self, name: http::header::HeaderName, value: HeaderValue) -> Result<Self> {
-        crate::util::signing::validate_presign_header(&name, &value)?;
-        self.headers.insert(name, value);
-        Ok(self)
-    }
-
-    /// Builds the presigned request.
-    pub fn build(self) -> Result<PresignedRequest> {
-        self.client.presign(
-            Method::HEAD,
-            &self.bucket,
-            &self.key,
-            self.expires_in,
-            self.query_params,
-            self.headers,
-        )
-    }
-}
-
-/// Request builder for presigned DELETE requests.
-pub struct BlockingPresignDeleteObjectRequest {
-    client: BlockingClient,
-    bucket: String,
-    key: String,
-    expires_in: Duration,
-    query_params: Vec<(String, String)>,
-    headers: HeaderMap,
-}
-
-impl BlockingPresignDeleteObjectRequest {
-    /// Sets the expiry duration.
-    pub fn expires_in(mut self, duration: Duration) -> Result<Self> {
-        crate::util::signing::validate_presign_expires(duration)?;
-        self.expires_in = duration;
-        Ok(self)
-    }
-
-    /// Adds a query parameter to the presigned URL.
-    pub fn query_param(
-        mut self,
-        name: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Result<Self> {
-        let name = name.into();
-        let value = value.into();
-        crate::util::signing::validate_presign_query_param(&name, &value)?;
-        self.query_params.push((name, value));
-        Ok(self)
-    }
-
-    /// Adds an HTTP header to sign.
-    pub fn header(mut self, name: http::header::HeaderName, value: HeaderValue) -> Result<Self> {
-        crate::util::signing::validate_presign_header(&name, &value)?;
-        self.headers.insert(name, value);
-        Ok(self)
-    }
-
-    /// Builds the presigned request.
-    pub fn build(self) -> Result<PresignedRequest> {
-        self.client.presign(
-            Method::DELETE,
-            &self.bucket,
-            &self.key,
-            self.expires_in,
-            self.query_params,
-            self.headers,
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1792,55 +1482,6 @@ mod tests {
             ),
             Err(other) => panic!("expected InvalidConfig, got {other:?}"),
             Ok(_) => panic!("expected InvalidConfig"),
-        }
-    }
-
-    #[test]
-    fn parse_xml_or_service_error_maps_error_xml_as_api_error() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-amz-request-id", HeaderValue::from_static("req-1"));
-        let body = r#"
-<Error>
-  <Code>InternalError</Code>
-  <Message>backend failure</Message>
-</Error>
-"#;
-
-        let err = parse_xml_or_service_error::<()>(StatusCode::OK, &headers, body, |_xml| {
-            Err(Error::decode("failed to parse success XML", None))
-        })
-        .expect_err("expected service error mapping");
-
-        match err {
-            Error::Api {
-                status,
-                code,
-                message,
-                request_id,
-                ..
-            } => {
-                assert_eq!(status, StatusCode::OK);
-                assert_eq!(code.as_deref(), Some("InternalError"));
-                assert_eq!(message.as_deref(), Some("backend failure"));
-                assert_eq!(request_id.as_deref(), Some("req-1"));
-            }
-            other => panic!("expected Api error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_xml_or_service_error_preserves_decode_error_for_plain_body() {
-        let err = parse_xml_or_service_error::<()>(
-            StatusCode::OK,
-            &HeaderMap::new(),
-            "not-xml",
-            |_xml| Err(Error::decode("failed to parse success XML", None)),
-        )
-        .expect_err("expected parse failure");
-
-        match err {
-            Error::Decode { .. } => {}
-            other => panic!("expected Decode error, got {other:?}"),
         }
     }
 
@@ -2022,19 +1663,25 @@ mod tests {
     }
 
     #[test]
-    fn put_object_request_applies_conditional_headers() {
+    fn put_object_request_applies_headers_and_metadata() {
         let request = test_client()
             .objects()
             .put("bucket", "locks/my-lock")
+            .content_type("text/plain")
+            .expect("content type should be valid")
+            .metadata("Owner", "alice")
+            .expect("metadata should be valid")
             .if_none_match("*")
             .expect("If-None-Match wildcard should be valid")
             .if_match("\"etag\"")
             .expect("If-Match should be valid");
 
-        let headers = request
-            .headers
-            .into_header_map()
-            .expect("headers should be valid");
+        let headers = request.headers;
+        assert_eq!(
+            headers.get(http::header::CONTENT_TYPE).unwrap(),
+            "text/plain"
+        );
+        assert_eq!(headers.get("x-amz-meta-owner").unwrap(), "alice");
 
         assert_eq!(
             headers

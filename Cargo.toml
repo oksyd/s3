@@ -3,14 +3,14 @@ name = "s3"
 version = "0.1.37"
 description = "A lean, modern, unofficial S3-compatible client for Rust."
 readme = "README.md"
-repository = "https://github.com/lvillis/s3-rs"
-homepage = "https://github.com/lvillis/s3-rs"
+repository = "https://github.com/oksyd/s3-rs"
+homepage = "https://github.com/oksyd/s3-rs"
 documentation = "https://docs.rs/s3"
 keywords = ["s3", "object-storage", "aws", "minio", "sigv4"]
 categories = ["api-bindings", "web-programming::http-client"]
 edition = "2024"
-rust-version = "1.98.1"
-license = "MIT"
+rust-version = "1.99.1"
+license = "Apache-2.0"
 include = [
   "Cargo.toml",
   "README.md",
@@ -38,14 +38,13 @@ sha1 = { version = "0.11.0", default-features = false, optional = true }
 
 quick-xml = { version = "0.42.0", default-features = false, features = ["serialize"] }
 serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
-serde_json = { version = "1.0.151", default-features = false, features = ["std"], optional = true }
+serde_json = { version = "1.0.154", default-features = false, features = ["std"], optional = true }
 
 futures-core = { version = "0.3.34", default-features = false, features = ["std"], optional = true }
-futures-io = { version = "0.3.34", default-features = false, features = ["std"], optional = true }
-futures-util = { version = "0.3.34", default-features = false, features = ["std", "io"], optional = true }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"], optional = true }
 http-body-util = { version = "0.1.5", default-features = false, optional = true }
-reqx = { version = "0.2.5", default-features = false, optional = true }
-tokio = { version = "1.53.1", default-features = false, features = ["time", "sync", "io-util"], optional = true }
+reqx = { version = "0.2.11", default-features = false, optional = true }
+tokio = { version = "1.54.0", default-features = false, features = ["time", "sync", "io-util"], optional = true }
 
 metrics = { version = "0.24.6", default-features = false, optional = true }
 tracing = { version = "0.1.44", default-features = false, features = ["std"], optional = true }
@@ -54,7 +53,7 @@ tracing = { version = "0.1.44", default-features = false, features = ["std"], op
 criterion = { version = "0.8.2" }
 
 reqwest = { version = "0.13.5", default-features = false, features = ["stream"] }
-tokio = { version = "1.53.1", default-features = false, features = ["macros", "rt-multi-thread", "time", "io-util"] }
+tokio = { version = "1.54.0", default-features = false, features = ["macros", "rt-multi-thread", "time", "io-util"] }
 ureq = { version = "3.4.2", default-features = false }
 
 [features]
@@ -64,7 +63,6 @@ default = ["async", "rustls"]
 async = [
   "dep:reqx",
   "dep:futures-core",
-  "dep:futures-io",
   "dep:futures-util",
   "dep:tokio",
   "dep:http-body-util",

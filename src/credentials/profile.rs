@@ -9,50 +9,64 @@ pub(crate) fn profile_from_env() -> Result<String, Error> {
     if let Some((name, profile)) =
         crate::util::env::optional_first_var(&["AWS_PROFILE", "AWS_DEFAULT_PROFILE"])?
     {
-        return validate_profile_name(name, profile);
+        validate_profile_name(name, &profile)?;
+        return Ok(profile);
     }
 
     Ok("default".to_string())
 }
 
 pub(crate) fn load_profile_credentials(profile: &str) -> Result<Credentials, Error> {
-    let profile = validate_profile_name("profile", profile.to_string())?;
+    validate_profile_name("profile", profile)?;
     let creds_ini = read_ini_file(&credentials_path()?)?;
-    let config_ini = match config_path() {
-        Ok(path) if path.exists() => read_ini_file(&path)?,
-        _ => HashMap::new(),
-    };
+    let config_ini = read_ini_file(&config_path()?)?;
 
-    let profile_section_credentials = profile.clone();
+    credentials_from_profiles(profile, &creds_ini, &config_ini)
+}
+
+type Profiles = HashMap<String, HashMap<String, String>>;
+
+fn credentials_from_profiles(
+    profile: &str,
+    credentials: &Profiles,
+    config: &Profiles,
+) -> Result<Credentials, Error> {
     let profile_section_config = if profile == "default" {
         "default".to_string()
     } else {
         format!("profile {profile}")
     };
 
-    let access_key_id = lookup_access_key(&creds_ini, &profile_section_credentials)
-        .or_else(|| lookup_access_key(&config_ini, &profile_section_config))
+    // A key pair and its optional session token must come from the same file.
+    let fields = credentials
+        .get(profile)
+        .filter(|fields| {
+            [
+                "aws_access_key_id",
+                "aws_secret_access_key",
+                "aws_session_token",
+            ]
+            .iter()
+            .any(|key| fields.contains_key(*key))
+        })
+        .or_else(|| config.get(&profile_section_config))
+        .ok_or_else(|| Error::invalid_config("profile has no static credentials"))?;
+    let access_key_id = fields
+        .get("aws_access_key_id")
         .ok_or_else(|| Error::invalid_config("missing aws_access_key_id in profile"))?;
-    let secret_access_key = lookup_secret_key(&creds_ini, &profile_section_credentials)
-        .or_else(|| lookup_secret_key(&config_ini, &profile_section_config))
+    let secret_access_key = fields
+        .get("aws_secret_access_key")
         .ok_or_else(|| Error::invalid_config("missing aws_secret_access_key in profile"))?;
 
-    let session_token = lookup(
-        &creds_ini,
-        &profile_section_credentials,
-        "aws_session_token",
-    )
-    .or_else(|| lookup(&config_ini, &profile_section_config, "aws_session_token"));
-
-    let mut creds = Credentials::new(access_key_id, secret_access_key)?;
-    if let Some(token) = session_token {
-        creds = creds.with_session_token(token)?;
+    let mut creds = Credentials::new(access_key_id.as_str(), secret_access_key.as_str())?;
+    if let Some(token) = fields.get("aws_session_token") {
+        creds = creds.with_session_token(token.as_str())?;
     }
 
     Ok(creds)
 }
 
-fn validate_profile_name(name: &'static str, value: String) -> Result<String, Error> {
+fn validate_profile_name(name: &'static str, value: &str) -> Result<(), Error> {
     if value.is_empty() {
         return Err(Error::invalid_config(format!("{name} must not be empty")));
     }
@@ -66,7 +80,7 @@ fn validate_profile_name(name: &'static str, value: String) -> Result<String, Er
             "{name} must not contain control characters"
         )));
     }
-    Ok(value)
+    Ok(())
 }
 
 fn env_path(name: &'static str) -> Result<Option<PathBuf>, Error> {
@@ -105,82 +119,64 @@ fn config_path() -> Result<PathBuf, Error> {
     Ok(default_aws_dir()?.join("config"))
 }
 
-fn read_ini_file(path: &Path) -> Result<HashMap<String, HashMap<String, String>>, Error> {
-    let contents = std::fs::read_to_string(path).map_err(|e| {
-        Error::invalid_config(format!(
-            "failed to read AWS profile file {}: {e}",
+fn read_ini_file(path: &Path) -> Result<Profiles, Error> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => parse_ini(&contents),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Profiles::new()),
+        Err(err) => Err(Error::invalid_config(format!(
+            "failed to read AWS profile file {}: {err}",
             path.display()
-        ))
-    })?;
-    Ok(parse_ini(&contents))
+        ))),
+    }
 }
 
-fn parse_ini(contents: &str) -> HashMap<String, HashMap<String, String>> {
-    let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
+fn parse_ini(contents: &str) -> Result<Profiles, Error> {
+    let mut sections = Profiles::new();
     let mut current: Option<String> = None;
 
-    for raw in contents.lines() {
+    for (index, raw) in contents.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
 
-        if line.starts_with('[') && line.ends_with(']') && line.len() >= 2 {
-            let name = line[1..line.len() - 1].trim();
-            if name.is_empty() {
-                current = None;
-            } else {
-                current = Some(name.to_string());
-            }
+        let invalid_line =
+            || Error::invalid_config(format!("invalid AWS profile syntax at line {}", index + 1));
+        if line.starts_with('[') {
+            let name = line
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(invalid_line)?;
+            current = Some(name.to_owned());
             continue;
         }
 
-        let Some(section) = current.as_ref() else {
-            continue;
-        };
-
-        let Some((k, v)) = line.split_once('=').or_else(|| line.split_once(':')) else {
-            continue;
-        };
+        let section = current.as_ref().ok_or_else(invalid_line)?;
+        let (k, v) = line.split_once('=').ok_or_else(invalid_line)?;
 
         let key = k.trim().to_ascii_lowercase();
         let value = v.trim().to_string();
         if key.is_empty() {
-            continue;
+            return Err(invalid_line());
         }
 
-        sections
-            .entry(section.to_string())
-            .or_default()
-            .insert(key, value);
+        let fields = sections.entry(section.clone()).or_default();
+        if matches!(
+            key.as_str(),
+            "aws_access_key_id" | "aws_secret_access_key" | "aws_session_token"
+        ) && fields.contains_key(&key)
+        {
+            return Err(Error::invalid_config(format!(
+                "duplicate {key} at line {}",
+                index + 1
+            )));
+        }
+        fields.insert(key, value);
     }
 
-    sections
-}
-
-fn lookup(
-    map: &HashMap<String, HashMap<String, String>>,
-    section: &str,
-    key: &str,
-) -> Option<String> {
-    map.get(section)
-        .and_then(|s| s.get(key))
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
-fn lookup_access_key(
-    map: &HashMap<String, HashMap<String, String>>,
-    section: &str,
-) -> Option<String> {
-    lookup(map, section, "aws_access_key_id").or_else(|| lookup(map, section, "aws_access_key"))
-}
-
-fn lookup_secret_key(
-    map: &HashMap<String, HashMap<String, String>>,
-    section: &str,
-) -> Option<String> {
-    lookup(map, section, "aws_secret_access_key").or_else(|| lookup(map, section, "aws_secret_key"))
+    Ok(sections)
 }
 
 #[cfg(test)]
@@ -194,52 +190,112 @@ mod tests {
 [default]
 aws_access_key_id = AKID
 aws_secret_access_key= SECRET
-aws_session_token: TOKEN
+aws_session_token = TOKEN
 
 [profile dev]
-aws_access_key = AKID2
-aws_secret_key : SECRET2
+aws_access_key_id = AKID2
+aws_secret_access_key = SECRET2
 
 ignored = outside
 "#;
 
-        let parsed = parse_ini(ini);
+        let parsed = parse_ini(ini).unwrap();
+        let credentials = credentials_from_profiles("default", &parsed, &Profiles::new()).unwrap();
+        assert_eq!(credentials.access_key_id(), "AKID");
+        assert_eq!(credentials.secret_access_key(), "SECRET");
+        assert_eq!(credentials.session_token(), Some("TOKEN"));
+        let credentials = credentials_from_profiles("dev", &Profiles::new(), &parsed).unwrap();
+        assert_eq!(credentials.access_key_id(), "AKID2");
+        assert_eq!(credentials.secret_access_key(), "SECRET2");
+    }
 
-        assert_eq!(
-            lookup_access_key(&parsed, "default").as_deref(),
-            Some("AKID")
-        );
-        assert_eq!(
-            lookup_secret_key(&parsed, "default").as_deref(),
-            Some("SECRET")
-        );
-        assert_eq!(
-            lookup(&parsed, "default", "aws_session_token").as_deref(),
-            Some("TOKEN")
-        );
+    #[test]
+    fn credential_files_are_selected_as_a_complete_group() {
+        let config = parse_ini("[default]\naws_access_key_id=CONFIG\naws_secret_access_key=SECRET\naws_session_token=TOKEN").unwrap();
+        for partial in [
+            "aws_access_key_id=PARTIAL",
+            "aws_secret_access_key=PARTIAL",
+            "aws_session_token=PARTIAL",
+            "aws_access_key_id=",
+        ] {
+            let credentials = parse_ini(&format!("[default]\n{partial}")).unwrap();
+            assert!(credentials_from_profiles("default", &credentials, &config).is_err());
+        }
+        let credentials =
+            parse_ini("[default]\naws_access_key_id=FILE\naws_secret_access_key=SECRET").unwrap();
+        let chosen = credentials_from_profiles("default", &credentials, &config).unwrap();
+        assert_eq!(chosen.access_key_id(), "FILE");
+        assert_eq!(chosen.session_token(), None);
+    }
 
-        assert_eq!(
-            lookup_access_key(&parsed, "profile dev").as_deref(),
-            Some("AKID2")
-        );
-        assert_eq!(
-            lookup_secret_key(&parsed, "profile dev").as_deref(),
-            Some("SECRET2")
-        );
+    #[test]
+    fn profile_file_errors_are_not_ignored() {
+        const MARKER: &str = "S3_TEST_PROFILE_FILES";
+        if let Ok(mode) = std::env::var(MARKER) {
+            let result = load_profile_credentials("default");
+            if mode == "config-only" {
+                assert_eq!(result.unwrap().access_key_id(), "CONFIG");
+            } else {
+                assert!(result.is_err());
+            }
+            return;
+        }
 
-        assert!(lookup(&parsed, "default", "ignored").is_none());
+        let directory = std::env::temp_dir().join(format!("s3-profile-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let config = directory.join("config");
+        std::fs::write(
+            &config,
+            "[default]\naws_access_key_id=CONFIG\naws_secret_access_key=SECRET",
+        )
+        .unwrap();
+        for (mode, path) in [
+            ("config-only", config.as_os_str()),
+            ("unreadable", directory.as_os_str()),
+            ("invalid-path", std::ffi::OsStr::new("")),
+        ] {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "credentials::profile::tests::profile_file_errors_are_not_ignored",
+                ])
+                .env(MARKER, mode)
+                .env("AWS_SHARED_CREDENTIALS_FILE", directory.join("missing"))
+                .env("AWS_CONFIG_FILE", path)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn malformed_profile_entries_are_not_silently_ignored() {
+        for input in [
+            "key=value",
+            "[]",
+            "[default",
+            "[default]\nkey:value",
+            "[default]\n=value",
+            "[default]\naws_access_key_id=A\naws_access_key_id=B",
+        ] {
+            assert!(parse_ini(input).is_err(), "{input}");
+        }
+        let legacy = parse_ini("[default]\naws_access_key=A\naws_secret_key=B").unwrap();
+        assert!(credentials_from_profiles("default", &legacy, &Profiles::new()).is_err());
     }
 
     #[test]
     fn profile_name_rejects_ambiguous_values() {
-        assert_eq!(
-            validate_profile_name("AWS_PROFILE", "dev profile".to_string()).unwrap(),
-            "dev profile"
-        );
-        assert!(validate_profile_name("AWS_PROFILE", String::new()).is_err());
-        assert!(validate_profile_name("AWS_PROFILE", " dev".to_string()).is_err());
-        assert!(validate_profile_name("AWS_PROFILE", "dev ".to_string()).is_err());
-        assert!(validate_profile_name("AWS_PROFILE", "dev\nprofile".to_string()).is_err());
+        validate_profile_name("AWS_PROFILE", "dev profile").unwrap();
+        assert!(validate_profile_name("AWS_PROFILE", "").is_err());
+        assert!(validate_profile_name("AWS_PROFILE", " dev").is_err());
+        assert!(validate_profile_name("AWS_PROFILE", "dev ").is_err());
+        assert!(validate_profile_name("AWS_PROFILE", "dev\nprofile").is_err());
     }
 
     #[test]

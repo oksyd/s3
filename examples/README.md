@@ -19,6 +19,10 @@ Most async examples support:
 - `S3_TLS_ROOT_STORE` (optional: `backend-default` / `webpki` / `system`)
 - `S3_CREDENTIALS_TLS_ROOT_STORE` (optional, IMDS/STS examples only: `backend-default` / `webpki` / `system`)
 
+The web identity example also requires `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, and
+`AWS_REGION` or `AWS_DEFAULT_REGION`. STS always uses regional endpoints. The IMDS example
+requires IMDSv2 when container credentials are not configured.
+
 ## Index
 
 ### Core object and bucket flows

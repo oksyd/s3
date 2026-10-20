@@ -5,55 +5,87 @@ use http::StatusCode;
 /// Library result type.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Details reported by S3 or a credential service.
+#[derive(Debug)]
+pub struct ApiError {
+    /// HTTP status returned by the service.
+    pub status: StatusCode,
+    /// Suggested delay before retrying, derived from `Retry-After` when present.
+    pub retry_after: Option<Duration>,
+    /// Service-specific error code, when present.
+    pub code: Option<String>,
+    /// Service-provided error message, when present.
+    pub message: Option<String>,
+    /// Service request id, when present in headers or the error payload.
+    pub request_id: Option<String>,
+    /// Service host id, when present.
+    pub host_id: Option<String>,
+    /// Truncated UTF-8 response body, absent when the body is not valid UTF-8.
+    pub body_snippet: Option<String>,
+}
+
+impl ApiError {
+    /// Returns true for HTTP 429 or a service throttling error code.
+    pub fn is_rate_limited(&self) -> bool {
+        self.status == StatusCode::TOO_MANY_REQUESTS
+            || self.code.as_deref().is_some_and(|code| {
+                matches!(
+                    code,
+                    "Throttling"
+                        | "ThrottlingException"
+                        | "ThrottledException"
+                        | "TooManyRequestsException"
+                        | "RequestLimitExceeded"
+                        | "SlowDown"
+                )
+            })
+    }
+
+    /// Returns true for throttling, server errors, or transient service error codes.
+    ///
+    /// The client also checks the operation and body replayability before retrying.
+    pub fn is_retryable(&self) -> bool {
+        self.status == StatusCode::TOO_MANY_REQUESTS
+            || self.status.is_server_error()
+            || self.has_retryable_code()
+    }
+
+    pub(crate) fn has_retryable_code(&self) -> bool {
+        self.code.as_deref().is_some_and(|code| {
+            matches!(
+                code,
+                "Throttling"
+                    | "ThrottlingException"
+                    | "ThrottledException"
+                    | "TooManyRequestsException"
+                    | "RequestLimitExceeded"
+                    | "SlowDown"
+                    | "RequestTimeout"
+                    | "RequestTimeoutException"
+                    | "InternalError"
+                    | "InternalFailure"
+                    | "ServiceUnavailable"
+            )
+        })
+    }
+}
+
 /// Error type for request building, transport, and API responses.
 #[non_exhaustive]
+#[derive(Debug)]
 pub enum Error {
     /// Invalid configuration or parameters.
     InvalidConfig {
         /// Human-readable validation failure message.
         message: String,
     },
-
     /// Request signing failed.
     Signing {
         /// Human-readable signing failure message.
         message: String,
     },
-
-    /// Request was throttled by the service.
-    RateLimited {
-        /// HTTP status returned by the service.
-        status: StatusCode,
-        /// Suggested delay before retrying, usually derived from `Retry-After`.
-        retry_after: Option<Duration>,
-        /// Service request id, when present in headers or the error payload.
-        request_id: Option<String>,
-        /// Service-specific error code, when present.
-        code: Option<String>,
-        /// Service-provided error message, when present.
-        message: Option<String>,
-        /// Service host id, when present.
-        host_id: Option<String>,
-        /// Truncated response body captured for debugging.
-        body_snippet: Option<String>,
-    },
-
-    /// Service returned an error response.
-    Api {
-        /// HTTP status returned by the service.
-        status: StatusCode,
-        /// Service-specific error code, when present.
-        code: Option<String>,
-        /// Service-provided error message, when present.
-        message: Option<String>,
-        /// Service request id, when present in headers or the error payload.
-        request_id: Option<String>,
-        /// Service host id, when present.
-        host_id: Option<String>,
-        /// Truncated response body captured for debugging.
-        body_snippet: Option<String>,
-    },
-
+    /// Service returned an error response, including throttling.
+    Api(Box<ApiError>),
     /// Transport-level failure (HTTP client, IO, TLS).
     Transport {
         /// Human-readable transport failure message.
@@ -61,7 +93,6 @@ pub enum Error {
         /// Underlying transport error, if preserved.
         source: Option<Box<dyn StdError + Send + Sync + 'static>>,
     },
-
     /// Response decode or parse failure.
     Decode {
         /// Human-readable decode failure message.
@@ -69,64 +100,6 @@ pub enum Error {
         /// Underlying decode error, if preserved.
         source: Option<Box<dyn StdError + Send + Sync + 'static>>,
     },
-}
-
-impl fmt::Debug for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidConfig { message } => f
-                .debug_struct("InvalidConfig")
-                .field("message", message)
-                .finish(),
-            Self::Signing { message } => {
-                f.debug_struct("Signing").field("message", message).finish()
-            }
-            Self::RateLimited {
-                status,
-                retry_after,
-                request_id,
-                code,
-                message,
-                host_id,
-                body_snippet,
-            } => f
-                .debug_struct("RateLimited")
-                .field("status", status)
-                .field("retry_after", retry_after)
-                .field("request_id", request_id)
-                .field("code", code)
-                .field("message", message)
-                .field("host_id", host_id)
-                .field("body_snippet", body_snippet)
-                .finish(),
-            Self::Api {
-                status,
-                code,
-                message,
-                request_id,
-                host_id,
-                body_snippet,
-            } => f
-                .debug_struct("Api")
-                .field("status", status)
-                .field("code", code)
-                .field("message", message)
-                .field("request_id", request_id)
-                .field("host_id", host_id)
-                .field("body_snippet", body_snippet)
-                .finish(),
-            Self::Transport { message, source } => f
-                .debug_struct("Transport")
-                .field("message", message)
-                .field("source", source)
-                .finish(),
-            Self::Decode { message, source } => f
-                .debug_struct("Decode")
-                .field("message", message)
-                .field("source", source)
-                .finish(),
-        }
-    }
 }
 
 impl Error {
@@ -166,141 +139,80 @@ impl Error {
         }
     }
 
+    /// Returns the service error details when available.
+    pub fn api_error(&self) -> Option<&ApiError> {
+        match self {
+            Self::Api(error) => Some(error),
+            _ => None,
+        }
+    }
+
     /// Returns an HTTP status when available.
     pub fn status(&self) -> Option<StatusCode> {
-        match self {
-            Self::Api { status, .. } => Some(*status),
-            Self::RateLimited { status, .. } => Some(*status),
-            Self::InvalidConfig { .. }
-            | Self::Signing { .. }
-            | Self::Transport { .. }
-            | Self::Decode { .. } => None,
-        }
+        self.api_error().map(|error| error.status)
     }
 
     /// Returns the request id if reported by the service.
     pub fn request_id(&self) -> Option<&str> {
-        match self {
-            Self::Api { request_id, .. } | Self::RateLimited { request_id, .. } => {
-                request_id.as_deref()
-            }
-            Self::InvalidConfig { .. }
-            | Self::Signing { .. }
-            | Self::Transport { .. }
-            | Self::Decode { .. } => None,
-        }
+        self.api_error()?.request_id.as_deref()
     }
 
     /// Returns the service error code when available.
     pub fn code(&self) -> Option<&str> {
-        match self {
-            Self::Api { code, .. } | Self::RateLimited { code, .. } => code.as_deref(),
-            Self::InvalidConfig { .. }
-            | Self::Signing { .. }
-            | Self::Transport { .. }
-            | Self::Decode { .. } => None,
-        }
+        self.api_error()?.code.as_deref()
     }
 
     /// Returns the service error message when available.
     pub fn message(&self) -> Option<&str> {
-        match self {
-            Self::Api { message, .. } | Self::RateLimited { message, .. } => message.as_deref(),
-            Self::InvalidConfig { .. }
-            | Self::Signing { .. }
-            | Self::Transport { .. }
-            | Self::Decode { .. } => None,
-        }
+        self.api_error()?.message.as_deref()
     }
 
     /// Returns the service host id when available.
     pub fn host_id(&self) -> Option<&str> {
-        match self {
-            Self::Api { host_id, .. } | Self::RateLimited { host_id, .. } => host_id.as_deref(),
-            Self::InvalidConfig { .. }
-            | Self::Signing { .. }
-            | Self::Transport { .. }
-            | Self::Decode { .. } => None,
-        }
+        self.api_error()?.host_id.as_deref()
     }
 
     /// Returns a truncated response body snippet when available.
     pub fn body_snippet(&self) -> Option<&str> {
-        match self {
-            Self::Api { body_snippet, .. } | Self::RateLimited { body_snippet, .. } => {
-                body_snippet.as_deref()
+        self.api_error()?.body_snippet.as_deref()
+    }
+
+    /// Returns the service's suggested retry delay when available.
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.api_error()?.retry_after
+    }
+
+    /// Returns true for HTTP 429 or a service throttling error code.
+    pub fn is_rate_limited(&self) -> bool {
+        self.api_error().is_some_and(ApiError::is_rate_limited)
+    }
+}
+
+impl StdError for ApiError {}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_rate_limited() {
+            write!(f, "rate limited: {}", self.status)?;
+            if let Some(delay) = self.retry_after {
+                write!(f, " (retry after {}s)", delay.as_secs())?;
             }
-            Self::InvalidConfig { .. }
-            | Self::Signing { .. }
-            | Self::Transport { .. }
-            | Self::Decode { .. } => None,
+        } else {
+            write!(f, "api error: {}", self.status)?;
         }
-    }
-
-    /// Returns true if the error is safe to retry.
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::RateLimited { .. } => true,
-            Self::Api { status, code, .. } => {
-                status.is_server_error()
-                    || code.as_deref().is_some_and(is_retryable_service_error_code)
+        for (label, value) in [
+            ("code", self.code.as_deref()),
+            ("request_id", self.request_id.as_deref()),
+            ("host_id", self.host_id.as_deref()),
+        ] {
+            if let Some(value) = value.filter(|value| !value.is_empty()) {
+                write!(f, " {label}={value}")?;
             }
-            Self::Transport { .. } => true,
-            Self::InvalidConfig { .. } | Self::Signing { .. } | Self::Decode { .. } => false,
         }
-    }
-}
-
-fn is_retryable_service_error_code(code: &str) -> bool {
-    matches!(
-        code,
-        "RequestTimeout"
-            | "RequestTimeoutException"
-            | "Throttling"
-            | "ThrottlingException"
-            | "ThrottledException"
-            | "TooManyRequestsException"
-            | "RequestLimitExceeded"
-            | "SlowDown"
-            | "InternalError"
-            | "InternalFailure"
-            | "ServiceUnavailable"
-    )
-}
-
-#[cfg(any(feature = "async", feature = "blocking"))]
-pub(crate) fn is_rate_limited_service_error_code(code: &str) -> bool {
-    matches!(
-        code,
-        "Throttling"
-            | "ThrottlingException"
-            | "ThrottledException"
-            | "TooManyRequestsException"
-            | "RequestLimitExceeded"
-            | "SlowDown"
-    )
-}
-
-fn format_optional_field(label: &str, value: &Option<String>) -> String {
-    match value.as_deref() {
-        Some(v) if !v.is_empty() => format!(" {label}={v}"),
-        _ => String::new(),
-    }
-}
-
-fn format_optional_message(value: &Option<String>) -> String {
-    match value.as_deref() {
-        Some(v) if !v.is_empty() => format!(" ({v})"),
-        _ => String::new(),
-    }
-}
-
-impl Error {
-    fn format_rate_limited_retry_after(retry_after: &Option<Duration>) -> String {
-        match retry_after {
-            Some(d) => format!(" (retry after {}s)", d.as_secs()),
-            None => String::new(),
+        if let Some(message) = self.message.as_deref().filter(|value| !value.is_empty()) {
+            write!(f, " ({message})")?;
         }
+        Ok(())
     }
 }
 
@@ -309,39 +221,7 @@ impl fmt::Display for Error {
         match self {
             Self::InvalidConfig { message } => write!(f, "invalid config: {message}"),
             Self::Signing { message } => write!(f, "signing error: {message}"),
-            Self::RateLimited {
-                status,
-                retry_after,
-                code,
-                message,
-                request_id,
-                host_id,
-                ..
-            } => {
-                let retry_after = Self::format_rate_limited_retry_after(retry_after);
-                let code = format_optional_field("code", code);
-                let request_id = format_optional_field("request_id", request_id);
-                let host_id = format_optional_field("host_id", host_id);
-                let msg = format_optional_message(message);
-                write!(
-                    f,
-                    "rate limited: {status}{retry_after}{code}{request_id}{host_id}{msg}"
-                )
-            }
-            Self::Api {
-                status,
-                code,
-                message,
-                request_id,
-                host_id,
-                ..
-            } => {
-                let code = format_optional_field("code", code);
-                let request_id = format_optional_field("request_id", request_id);
-                let host_id = format_optional_field("host_id", host_id);
-                let msg = format_optional_message(message);
-                write!(f, "api error: {status}{code}{request_id}{host_id}{msg}")
-            }
+            Self::Api(error) => fmt::Display::fmt(error, f),
             Self::Transport { message, .. } => write!(f, "transport error: {message}"),
             Self::Decode { message, .. } => write!(f, "decode error: {message}"),
         }
@@ -354,10 +234,8 @@ impl StdError for Error {
             Self::Transport { source, .. } | Self::Decode { source, .. } => {
                 source.as_deref().map(|e| e as &(dyn StdError + 'static))
             }
-            Self::InvalidConfig { .. }
-            | Self::Signing { .. }
-            | Self::RateLimited { .. }
-            | Self::Api { .. } => None,
+            Self::Api(error) => Some(error.as_ref()),
+            Self::InvalidConfig { .. } | Self::Signing { .. } => None,
         }
     }
 }
@@ -366,45 +244,52 @@ impl StdError for Error {
 mod tests {
     use super::*;
 
+    fn service_error(status: StatusCode, code: &str) -> Error {
+        Error::Api(Box::new(ApiError {
+            status,
+            retry_after: Some(Duration::from_secs(2)),
+            code: Some(code.to_string()),
+            message: Some("service failure".to_string()),
+            request_id: Some("req-1".to_string()),
+            host_id: Some("host-1".to_string()),
+            body_snippet: None,
+        }))
+    }
+
     #[test]
     fn api_error_retryability_can_be_driven_by_service_code() {
-        let err = Error::Api {
-            status: StatusCode::OK,
-            code: Some("InternalError".to_string()),
-            message: Some("backend failure".to_string()),
-            request_id: None,
-            host_id: None,
-            body_snippet: None,
-        };
-        assert!(err.is_retryable());
+        let err = service_error(StatusCode::OK, "InternalError");
+        assert!(err.api_error().unwrap().is_retryable());
+        assert!(!err.is_rate_limited());
     }
 
     #[test]
     fn api_error_with_non_retryable_code_and_2xx_status_is_not_retryable() {
-        let err = Error::Api {
-            status: StatusCode::OK,
-            code: Some("AccessDenied".to_string()),
-            message: Some("denied".to_string()),
-            request_id: None,
-            host_id: None,
-            body_snippet: None,
-        };
-        assert!(!err.is_retryable());
+        let err = service_error(StatusCode::OK, "AccessDenied");
+        assert!(!err.api_error().unwrap().is_retryable());
     }
 
     #[test]
     fn api_error_display_includes_host_id_when_available() {
-        let err = Error::Api {
-            status: StatusCode::FORBIDDEN,
-            code: Some("AccessDenied".to_string()),
-            message: Some("denied".to_string()),
-            request_id: Some("req-1".to_string()),
-            host_id: Some("host-1".to_string()),
-            body_snippet: None,
-        };
+        let err = service_error(StatusCode::FORBIDDEN, "AccessDenied");
+        assert_eq!(
+            err.to_string(),
+            "api error: 403 Forbidden code=AccessDenied request_id=req-1 host_id=host-1 (service failure)"
+        );
+    }
 
-        let text = err.to_string();
-        assert!(text.contains("request_id=req-1"));
-        assert!(text.contains("host_id=host-1"));
+    #[test]
+    fn throttling_classification_uses_status_or_service_code() {
+        for (status, code) in [
+            (StatusCode::TOO_MANY_REQUESTS, "Unknown"),
+            (StatusCode::BAD_REQUEST, "SlowDown"),
+            (StatusCode::OK, "ThrottlingException"),
+        ] {
+            let err = service_error(status, code);
+            assert!(err.is_rate_limited());
+            assert!(err.api_error().unwrap().is_retryable());
+            assert_eq!(err.retry_after(), Some(Duration::from_secs(2)));
+            assert!(err.to_string().starts_with("rate limited:"));
+        }
     }
 }

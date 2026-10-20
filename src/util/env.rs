@@ -40,11 +40,6 @@ where
     Ok(None)
 }
 
-#[cfg(any(feature = "credentials-imds", feature = "credentials-sts"))]
-pub(crate) fn optional_non_empty_var(name: &'static str) -> Result<Option<String>> {
-    Ok(optional_var(name)?.filter(|value| !value.is_empty()))
-}
-
 pub(crate) fn required_var(name: &'static str) -> Result<String> {
     optional_var(name)?.ok_or_else(|| Error::invalid_config(format!("missing {name}")))
 }

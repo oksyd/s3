@@ -1,4 +1,4 @@
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use super::parse_expiration;
 
 #[cfg(any(feature = "async", feature = "blocking"))]
 use reqx::{
@@ -36,24 +36,6 @@ impl MetadataCredentials {
         let expires_at = parse_expiration(&expiration)?;
         Ok(CredentialsSnapshot::new(creds).with_expires_at(expires_at))
     }
-}
-
-fn parse_expiration(value: &str) -> Result<OffsetDateTime, Error> {
-    if value.is_empty() {
-        return Err(Error::decode("missing credentials expiration", None));
-    }
-    if value.trim() != value {
-        return Err(Error::decode(
-            "credentials expiration timestamp must not include leading or trailing whitespace",
-            None,
-        ));
-    }
-    OffsetDateTime::parse(value, &Rfc3339).map_err(|e| {
-        Error::decode(
-            "failed to parse credentials expiration timestamp",
-            Some(Box::new(e)),
-        )
-    })
 }
 
 fn parse_container_credentials_full_uri(value: &str) -> Result<url::Url, Error> {
@@ -137,42 +119,40 @@ fn parse_container_credentials_relative_uri(value: &str) -> Result<String, Error
             "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI must not include a fragment",
         ));
     }
-    Ok(value.to_string())
+    Ok(full)
 }
 
 fn is_allowed_http_container_credentials_host(uri: &url::Url) -> bool {
-    let Some(host) = uri.host_str() else {
-        return false;
-    };
-    if host.eq_ignore_ascii_case("localhost") || host == "169.254.170.2" {
-        return true;
+    match uri.host() {
+        Some(url::Host::Domain("localhost")) => true,
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.octets() == [169, 254, 170, 2],
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
     }
-
-    host.parse::<std::net::IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
 }
 
-fn imds_v1_disabled_value(value: &str) -> bool {
-    let value = value.trim();
-    value == "1" || value.eq_ignore_ascii_case("true")
+fn container_credentials_request() -> Result<Option<(String, http::HeaderMap)>, Error> {
+    let url = if let Some(relative) =
+        crate::util::env::optional_var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")?
+    {
+        parse_container_credentials_relative_uri(&relative)?
+    } else if let Some(full) = crate::util::env::optional_var("AWS_CONTAINER_CREDENTIALS_FULL_URI")?
+    {
+        parse_container_credentials_full_uri(&full)?.into()
+    } else {
+        return Ok(None);
+    };
+    Ok(Some((url, container_auth_headers()?)))
 }
 
-fn imds_v1_fallback_allowed() -> Result<bool, Error> {
-    Ok(
-        !crate::util::env::optional_var("AWS_EC2_METADATA_V1_DISABLED")?
-            .as_deref()
-            .is_some_and(imds_v1_disabled_value),
-    )
-}
-
-fn should_fallback_to_imds_v1_from_token_error(err: &Error) -> bool {
-    matches!(
-        err.status(),
-        Some(http::StatusCode::FORBIDDEN)
-            | Some(http::StatusCode::NOT_FOUND)
-            | Some(http::StatusCode::METHOD_NOT_ALLOWED)
-    )
+fn parse_metadata_credentials(
+    response: reqx::Response,
+    error_message: &'static str,
+) -> Result<CredentialsSnapshot, Error> {
+    let body = crate::util::text::decode_utf8_response_body(response.body())?;
+    let parsed: MetadataCredentials =
+        serde_json::from_str(body).map_err(|e| Error::decode(error_message, Some(Box::new(e))))?;
+    parsed.into_snapshot()
 }
 
 #[cfg(feature = "async")]
@@ -181,115 +161,64 @@ pub(crate) async fn load_async(tls_root_store: TlsRootStore) -> Result<Credentia
 
     let client = metadata_async_client(Duration::from_secs(2), tls_root_store)?;
 
-    if let Some(full) =
-        crate::util::env::optional_non_empty_var("AWS_CONTAINER_CREDENTIALS_FULL_URI")?
-    {
-        let full = parse_container_credentials_full_uri(&full)?;
-        let headers = container_auth_headers()?;
-        let body = http_get_text(&client, full.as_str(), headers).await?;
-        let parsed: MetadataCredentials = serde_json::from_str(&body).map_err(|e| {
-            Error::decode(
-                "failed to parse container credentials JSON",
-                Some(Box::new(e)),
-            )
-        })?;
-        return parsed.into_snapshot();
+    if let Some((url, headers)) = container_credentials_request()? {
+        let resp = http_get(&client, url, &headers).await?;
+        return parse_metadata_credentials(resp, "failed to parse container credentials JSON");
     }
 
-    if let Some(rel) =
-        crate::util::env::optional_non_empty_var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")?
-    {
-        let rel = parse_container_credentials_relative_uri(&rel)?;
-        let url = format!("http://169.254.170.2{rel}");
-        let headers = container_auth_headers()?;
-        let body = http_get_text(&client, &url, headers).await?;
-        let parsed: MetadataCredentials = serde_json::from_str(&body).map_err(|e| {
-            Error::decode(
-                "failed to parse container credentials JSON",
-                Some(Box::new(e)),
-            )
-        })?;
-        return parsed.into_snapshot();
-    }
+    let headers = http::HeaderMap::from_iter([(
+        http::header::HeaderName::from_static("x-aws-ec2-metadata-token"),
+        fetch_imds_v2_token(&client).await?,
+    )]);
 
-    let token = match fetch_imds_v2_token(&client).await {
-        Ok(token) => Some(token),
-        Err(err) if should_fallback_to_imds_v1_from_token_error(&err) => {
-            if imds_v1_fallback_allowed()? {
-                None
-            } else {
-                return Err(err);
-            }
-        }
-        Err(err) => return Err(err),
-    };
-    let mut headers = http::HeaderMap::new();
-    if let Some(token) = token.as_deref().filter(|v| !v.is_empty()) {
-        let value = http::HeaderValue::from_str(token)
-            .map_err(|_| Error::invalid_config("invalid IMDS token"))?;
-        headers.insert("X-aws-ec2-metadata-token", value);
-    }
-
-    let role = http_get_text(
+    let role = http_get(
         &client,
-        "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-        headers.clone(),
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/".to_string(),
+        &headers,
     )
     .await?;
-    let role = imds_role_name_from_body(&role)?;
-    let role = crate::util::encode::aws_percent_encode(&role);
+    let role =
+        imds_role_name_from_body(crate::util::text::decode_utf8_response_body(role.body())?)?;
+    let role = crate::util::encode::aws_percent_encode(role);
 
     let url = format!("http://169.254.169.254/latest/meta-data/iam/security-credentials/{role}");
-    let body = http_get_text(&client, &url, headers).await?;
-    let parsed: MetadataCredentials = serde_json::from_str(&body)
-        .map_err(|e| Error::decode("failed to parse IMDS credentials JSON", Some(Box::new(e))))?;
-    parsed.into_snapshot()
+    let body = http_get(&client, url, &headers).await?;
+    parse_metadata_credentials(body, "failed to parse IMDS credentials JSON")
 }
 
 #[cfg(feature = "async")]
-async fn http_get_text(
+async fn http_get(
     client: &reqx::Client,
-    url: &str,
-    headers: http::HeaderMap,
-) -> Result<String, Error> {
-    let mut req = client
-        .request(http::Method::GET, url.to_string())
-        .redirect_policy(RedirectPolicy::none());
-    for (name, value) in headers {
-        if let Some(name) = name {
-            req = req.header(name, value);
-        }
+    url: String,
+    headers: &http::HeaderMap,
+) -> Result<reqx::Response, Error> {
+    let mut req = client.request(http::Method::GET, url);
+    for name in headers.keys() {
+        req = req.header(name.clone(), headers[name].clone());
     }
 
     let resp = req
-        .status_policy(StatusPolicy::Response)
         .send()
         .await
         .map_err(|e| crate::transport::map_reqx_error("request failed", e))?;
     let status = resp.status();
     if status.is_success() {
-        return crate::util::text::decode_utf8_response_body(resp.body());
+        return Ok(resp);
     }
-    Err(crate::transport::response_error_from_body(
-        status,
-        resp.headers(),
-        resp.body(),
-    ))
+    Err(crate::transport::response_error(resp))
 }
 
 #[cfg(feature = "async")]
-async fn fetch_imds_v2_token(client: &reqx::Client) -> Result<String, Error> {
+async fn fetch_imds_v2_token(client: &reqx::Client) -> Result<http::HeaderValue, Error> {
     let resp = client
         .request(
             http::Method::PUT,
             "http://169.254.169.254/latest/api/token".to_string(),
         )
-        .redirect_policy(RedirectPolicy::none())
         .header(
             http::header::HeaderName::from_static("x-aws-ec2-metadata-token-ttl-seconds"),
             http::HeaderValue::from_static("21600"),
         )
-        .status_policy(StatusPolicy::Response)
         .send()
         .await
         .map_err(|e| crate::transport::map_reqx_error("request failed", e))?;
@@ -307,22 +236,21 @@ async fn fetch_imds_v2_token(client: &reqx::Client) -> Result<String, Error> {
 #[cfg(any(feature = "async", feature = "blocking"))]
 fn container_auth_headers() -> Result<http::HeaderMap, Error> {
     let mut headers = http::HeaderMap::new();
-    if let Some(token) = crate::util::env::optional_var("AWS_CONTAINER_AUTHORIZATION_TOKEN")? {
-        let value = container_authorization_header_value(
-            "AWS_CONTAINER_AUTHORIZATION_TOKEN",
-            &token,
-            false,
-        )?;
-        headers.insert(http::header::AUTHORIZATION, value);
-    } else if let Some(path) =
-        crate::util::env::optional_var("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE")?
-    {
+    if let Some(path) = crate::util::env::optional_var("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE")? {
         let token = std::fs::read_to_string(path)
             .map_err(|e| Error::invalid_config(format!("failed to read token file: {e}")))?;
         let value = container_authorization_header_value(
             "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
             &token,
             true,
+        )?;
+        headers.insert(http::header::AUTHORIZATION, value);
+    } else if let Some(token) = crate::util::env::optional_var("AWS_CONTAINER_AUTHORIZATION_TOKEN")?
+    {
+        let value = container_authorization_header_value(
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+            &token,
+            false,
         )?;
         headers.insert(http::header::AUTHORIZATION, value);
     }
@@ -335,113 +263,66 @@ pub(crate) fn load_blocking(tls_root_store: TlsRootStore) -> Result<CredentialsS
 
     let client = metadata_blocking_client(Duration::from_secs(2), tls_root_store)?;
 
-    if let Some(full) =
-        crate::util::env::optional_non_empty_var("AWS_CONTAINER_CREDENTIALS_FULL_URI")?
-    {
-        let full = parse_container_credentials_full_uri(&full)?;
-        let headers = container_auth_headers()?;
-        let body = http_get_text_blocking(&client, full.as_str(), &headers)?;
-        let parsed: MetadataCredentials = serde_json::from_str(&body).map_err(|e| {
-            Error::decode(
-                "failed to parse container credentials JSON",
-                Some(Box::new(e)),
-            )
-        })?;
-        return parsed.into_snapshot();
+    if let Some((url, headers)) = container_credentials_request()? {
+        let resp = http_get_blocking(&client, url, &headers)?;
+        return parse_metadata_credentials(resp, "failed to parse container credentials JSON");
     }
 
-    if let Some(rel) =
-        crate::util::env::optional_non_empty_var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")?
-    {
-        let rel = parse_container_credentials_relative_uri(&rel)?;
-        let url = format!("http://169.254.170.2{rel}");
-        let headers = container_auth_headers()?;
-        let body = http_get_text_blocking(&client, &url, &headers)?;
-        let parsed: MetadataCredentials = serde_json::from_str(&body).map_err(|e| {
-            Error::decode(
-                "failed to parse container credentials JSON",
-                Some(Box::new(e)),
-            )
-        })?;
-        return parsed.into_snapshot();
-    }
+    let headers = http::HeaderMap::from_iter([(
+        http::header::HeaderName::from_static("x-aws-ec2-metadata-token"),
+        fetch_imds_v2_token_blocking(&client)?,
+    )]);
 
-    let token = match fetch_imds_v2_token_blocking(&client) {
-        Ok(token) => Some(token),
-        Err(err) if should_fallback_to_imds_v1_from_token_error(&err) => {
-            if imds_v1_fallback_allowed()? {
-                None
-            } else {
-                return Err(err);
-            }
-        }
-        Err(err) => return Err(err),
-    };
-    let mut headers = http::HeaderMap::new();
-    if let Some(token) = token.as_deref().filter(|v| !v.is_empty()) {
-        let value = http::HeaderValue::from_str(token)
-            .map_err(|_| Error::invalid_config("invalid IMDS token"))?;
-        headers.insert("X-aws-ec2-metadata-token", value);
-    }
-
-    let role = http_get_text_blocking(
+    let role = http_get_blocking(
         &client,
-        "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/".to_string(),
         &headers,
     )?;
-    let role = imds_role_name_from_body(&role)?;
-    let role = crate::util::encode::aws_percent_encode(&role);
+    let role =
+        imds_role_name_from_body(crate::util::text::decode_utf8_response_body(role.body())?)?;
+    let role = crate::util::encode::aws_percent_encode(role);
 
     let url = format!("http://169.254.169.254/latest/meta-data/iam/security-credentials/{role}");
-    let body = http_get_text_blocking(&client, &url, &headers)?;
-    let parsed: MetadataCredentials = serde_json::from_str(&body)
-        .map_err(|e| Error::decode("failed to parse IMDS credentials JSON", Some(Box::new(e))))?;
-    parsed.into_snapshot()
+    let body = http_get_blocking(&client, url, &headers)?;
+    parse_metadata_credentials(body, "failed to parse IMDS credentials JSON")
 }
 
 #[cfg(feature = "blocking")]
-fn http_get_text_blocking(
+fn http_get_blocking(
     client: &reqx::blocking::Client,
-    url: &str,
+    url: String,
     headers: &http::HeaderMap,
-) -> Result<String, Error> {
-    let mut req = client
-        .request(http::Method::GET, url.to_string())
-        .redirect_policy(RedirectPolicy::none());
+) -> Result<reqx::Response, Error> {
+    let mut req = client.request(http::Method::GET, url);
     for (name, value) in headers {
         req = req.header(name.clone(), value.clone());
     }
 
     let resp = req
-        .status_policy(StatusPolicy::Response)
         .send()
         .map_err(|e| crate::transport::map_reqx_error("request failed", e))?;
     let status = resp.status();
 
     if status.is_success() {
-        return crate::util::text::decode_utf8_response_body(resp.body());
+        return Ok(resp);
     }
 
-    Err(crate::transport::response_error_from_body(
-        status,
-        resp.headers(),
-        resp.body(),
-    ))
+    Err(crate::transport::response_error(resp))
 }
 
 #[cfg(feature = "blocking")]
-fn fetch_imds_v2_token_blocking(client: &reqx::blocking::Client) -> Result<String, Error> {
+fn fetch_imds_v2_token_blocking(
+    client: &reqx::blocking::Client,
+) -> Result<http::HeaderValue, Error> {
     let resp = client
         .request(
             http::Method::PUT,
             "http://169.254.169.254/latest/api/token".to_string(),
         )
-        .redirect_policy(RedirectPolicy::none())
         .header(
             http::header::HeaderName::from_static("x-aws-ec2-metadata-token-ttl-seconds"),
             http::HeaderValue::from_static("21600"),
         )
-        .status_policy(StatusPolicy::Response)
         .send()
         .map_err(|e| crate::transport::map_reqx_error("request failed", e))?;
 
@@ -458,7 +339,7 @@ fn fetch_imds_v2_token_blocking(client: &reqx::blocking::Client) -> Result<Strin
     ))
 }
 
-fn imds_token_from_body(body: &bytes::Bytes) -> Result<String, Error> {
+fn imds_token_from_body(body: &bytes::Bytes) -> Result<http::HeaderValue, Error> {
     let token = crate::util::text::decode_single_line_response_body("IMDSv2 token", body)?;
     if token.bytes().any(|b| b.is_ascii_whitespace()) {
         return Err(Error::decode(
@@ -466,12 +347,11 @@ fn imds_token_from_body(body: &bytes::Bytes) -> Result<String, Error> {
             None,
         ));
     }
-    http::HeaderValue::from_str(&token)
-        .map_err(|_| Error::decode("IMDSv2 token response is not a valid header value", None))?;
-    Ok(token)
+    http::HeaderValue::from_str(token)
+        .map_err(|_| Error::decode("IMDSv2 token response is not a valid header value", None))
 }
 
-fn imds_role_name_from_body(body: &str) -> Result<String, Error> {
+fn imds_role_name_from_body(body: &str) -> Result<&str, Error> {
     let role = crate::util::text::strip_trailing_line_ending(body);
     if role.is_empty() {
         return Err(Error::decode("missing IMDS role name", None));
@@ -483,7 +363,7 @@ fn imds_role_name_from_body(body: &str) -> Result<String, Error> {
     {
         return Err(Error::decode("invalid IMDS role name", None));
     }
-    Ok(role.to_string())
+    Ok(role)
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
@@ -713,6 +593,8 @@ mod tests {
 
     #[test]
     fn parse_container_credentials_full_uri_accepts_allowed_hosts() {
+        assert!(parse_container_credentials_full_uri("http://[::1]:8080/creds").is_ok());
+        assert!(parse_container_credentials_full_uri("http://[2001:db8::1]/creds").is_err());
         assert!(
             parse_container_credentials_full_uri("http://169.254.170.2/creds").is_ok(),
             "ECS task role endpoint should be accepted",
@@ -725,6 +607,54 @@ mod tests {
             parse_container_credentials_full_uri("https://example.com/creds").is_ok(),
             "https endpoint should be accepted",
         );
+    }
+
+    #[test]
+    fn container_environment_precedence() {
+        const MARKER: &str = "S3_TEST_CONTAINER_PRECEDENCE";
+        if let Ok(mode) = std::env::var(MARKER) {
+            if mode == "invalid" {
+                assert!(container_credentials_request().is_err());
+            } else {
+                let (uri, headers) = container_credentials_request().unwrap().unwrap();
+                assert_eq!(uri, "http://169.254.170.2/credentials");
+                assert_eq!(headers[http::header::AUTHORIZATION], "file-token");
+            }
+            return;
+        }
+
+        let token_file = std::env::temp_dir().join(format!("s3-imds-token-{}", std::process::id()));
+        std::fs::write(&token_file, "file-token\n").unwrap();
+        for relative in ["/credentials", ""] {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "credentials::imds::tests::container_environment_precedence",
+                ])
+                .env(
+                    MARKER,
+                    if relative.is_empty() {
+                        "invalid"
+                    } else {
+                        "valid"
+                    },
+                )
+                .env("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", relative)
+                .env(
+                    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                    "http://localhost/ignored",
+                )
+                .env("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", &token_file)
+                .env("AWS_CONTAINER_AUTHORIZATION_TOKEN", "ignored-token")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+        }
+        std::fs::remove_file(token_file).unwrap();
     }
 
     #[test]
@@ -781,7 +711,7 @@ mod tests {
     fn parse_container_credentials_relative_uri_accepts_valid_path() {
         let parsed = parse_container_credentials_relative_uri("/v2/credentials/abc")
             .expect("valid relative URI should pass");
-        assert_eq!(parsed, "/v2/credentials/abc");
+        assert_eq!(parsed, "http://169.254.170.2/v2/credentials/abc");
     }
 
     #[test]
@@ -835,58 +765,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn imds_v1_disabled_value_parsing_matches_expected_inputs() {
-        assert!(imds_v1_disabled_value("true"));
-        assert!(imds_v1_disabled_value("TRUE"));
-        assert!(imds_v1_disabled_value("1"));
-        assert!(!imds_v1_disabled_value("false"));
-        assert!(!imds_v1_disabled_value("0"));
-        assert!(!imds_v1_disabled_value("yes"));
-    }
-
-    #[test]
-    fn imds_v1_fallback_only_allows_specific_token_error_statuses() {
-        let allowed = [
-            http::StatusCode::FORBIDDEN,
-            http::StatusCode::NOT_FOUND,
-            http::StatusCode::METHOD_NOT_ALLOWED,
-        ];
-        for status in allowed {
-            let err = Error::Api {
-                status,
-                code: None,
-                message: None,
-                request_id: None,
-                host_id: None,
-                body_snippet: None,
-            };
-            assert!(should_fallback_to_imds_v1_from_token_error(&err));
-        }
-
-        let denied = [
-            http::StatusCode::BAD_REQUEST,
-            http::StatusCode::UNAUTHORIZED,
-            http::StatusCode::TOO_MANY_REQUESTS,
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-        ];
-        for status in denied {
-            let err = Error::Api {
-                status,
-                code: None,
-                message: None,
-                request_id: None,
-                host_id: None,
-                body_snippet: None,
-            };
-            assert!(!should_fallback_to_imds_v1_from_token_error(&err));
-        }
-
-        assert!(!should_fallback_to_imds_v1_from_token_error(
-            &Error::transport("network timeout", None,)
-        ));
-    }
-
     #[cfg(feature = "async")]
     #[test]
     fn metadata_async_client_accepts_backend_default() {
@@ -897,14 +775,31 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn http_get_text_maps_429_to_rate_limited_async() -> std::result::Result<(), Error> {
+    async fn http_get_does_not_follow_redirects_async() -> std::result::Result<(), Error> {
+        let (addr, handle) = spawn_test_server(
+            b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        )?;
+        let client = metadata_async_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
+        let err = http_get(&client, format!("http://{addr}/"), &http::HeaderMap::new())
+            .await
+            .expect_err("redirects must be returned as API errors");
+        handle
+            .join()
+            .map_err(|_| Error::transport("test server thread panicked", None))?;
+        assert_eq!(err.status(), Some(http::StatusCode::TEMPORARY_REDIRECT));
+        Ok(())
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn http_get_maps_429_to_rate_limited_async() -> std::result::Result<(), Error> {
         let (addr, handle) = spawn_test_server(
             b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3\r\nx-amz-request-id: req-1\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow".to_vec(),
         )?;
         let client = metadata_async_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
         let url = format!("http://{addr}/");
 
-        let err = http_get_text(&client, &url, http::HeaderMap::new())
+        let err = http_get(&client, url, &http::HeaderMap::new())
             .await
             .expect_err("expected non-success IMDS response to be mapped");
         handle
@@ -912,11 +807,13 @@ mod tests {
             .map_err(|_| Error::transport("test server thread panicked", None))?;
 
         match err {
-            Error::RateLimited {
-                retry_after,
-                request_id,
-                ..
-            } => {
+            Error::Api(error) => {
+                assert!(error.is_rate_limited());
+                let crate::ApiError {
+                    retry_after,
+                    request_id,
+                    ..
+                } = *error;
                 assert_eq!(retry_after, Some(Duration::from_secs(3)));
                 assert_eq!(request_id.as_deref(), Some("req-1"));
             }
@@ -953,7 +850,24 @@ mod tests {
 
     #[cfg(feature = "blocking")]
     #[test]
-    fn http_get_text_blocking_maps_429_to_rate_limited() -> std::result::Result<(), Error> {
+    fn http_get_does_not_follow_redirects_blocking() -> std::result::Result<(), Error> {
+        let (addr, handle) = spawn_test_server(
+            b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        )?;
+        let client =
+            metadata_blocking_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
+        let err = http_get_blocking(&client, format!("http://{addr}/"), &http::HeaderMap::new())
+            .expect_err("redirects must be returned as API errors");
+        handle
+            .join()
+            .map_err(|_| Error::transport("test server thread panicked", None))?;
+        assert_eq!(err.status(), Some(http::StatusCode::TEMPORARY_REDIRECT));
+        Ok(())
+    }
+
+    #[cfg(feature = "blocking")]
+    #[test]
+    fn http_get_blocking_maps_429_to_rate_limited() -> std::result::Result<(), Error> {
         let (addr, handle) = spawn_test_server(
             b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3\r\nx-amz-request-id: req-1\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow".to_vec(),
         )?;
@@ -961,18 +875,20 @@ mod tests {
             metadata_blocking_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
         let url = format!("http://{addr}/");
 
-        let err = http_get_text_blocking(&client, &url, &http::HeaderMap::new())
+        let err = http_get_blocking(&client, url, &http::HeaderMap::new())
             .expect_err("expected non-success IMDS response to be mapped");
         handle
             .join()
             .map_err(|_| Error::transport("test server thread panicked", None))?;
 
         match err {
-            Error::RateLimited {
-                retry_after,
-                request_id,
-                ..
-            } => {
+            Error::Api(error) => {
+                assert!(error.is_rate_limited());
+                let crate::ApiError {
+                    retry_after,
+                    request_id,
+                    ..
+                } = *error;
                 assert_eq!(retry_after, Some(Duration::from_secs(3)));
                 assert_eq!(request_id.as_deref(), Some("req-1"));
             }

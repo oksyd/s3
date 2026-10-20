@@ -8,7 +8,6 @@ use std::{
 use s3::{Auth, Credentials};
 
 #[cfg(all(feature = "async", feature = "providers"))]
-#[allow(clippy::result_large_err)]
 #[tokio::main]
 async fn main() -> Result<(), s3::Error> {
     let account_id = match env::var("R2_ACCOUNT_ID") {
@@ -53,16 +52,13 @@ async fn main() -> Result<(), s3::Error> {
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        Some(value) => {
-            let jurisdiction = match value.parse::<s3::providers::R2Jurisdiction>() {
-                Ok(v) => v,
-                Err(_) => {
-                    eprintln!("R2_JURISDICTION must be one of: eu, fedramp");
-                    return Ok(());
-                }
-            };
-            s3::providers::R2Endpoint::Jurisdiction(jurisdiction)
-        }
+        Some(value) => match value.parse::<s3::providers::R2Endpoint>() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("R2_JURISDICTION must be one of: global, eu, fedramp");
+                return Ok(());
+            }
+        },
         None => s3::providers::R2Endpoint::Global,
     };
     let preset = s3::providers::cloudflare_r2(&account_id, endpoint)?;

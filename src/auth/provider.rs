@@ -3,13 +3,9 @@ use std::sync::Arc;
 #[cfg(feature = "async")]
 use std::{future::Future, pin::Pin};
 
-#[cfg(all(
-    any(feature = "async", feature = "blocking"),
-    any(feature = "credentials-imds", feature = "credentials-sts")
-))]
-use reqx::advanced::TlsRootStore;
-
 use crate::Result;
+#[cfg(any(feature = "credentials-imds", feature = "credentials-sts"))]
+use crate::TlsRootStore;
 
 use super::{Auth, Credentials};
 
@@ -43,35 +39,6 @@ pub trait CredentialsProvider: std::fmt::Debug + Send + Sync {
 /// Shared credentials provider trait object.
 pub type DynCredentialsProvider = Arc<dyn CredentialsProvider>;
 
-/// Trust root selection for credential-provider HTTPS requests (IMDS/STS).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CredentialsTlsRootStore {
-    /// Use the backend default trust roots.
-    ///
-    /// For `rustls`, this maps to WebPKI roots.
-    /// For `native-tls`, this follows backend default behavior.
-    #[default]
-    BackendDefault,
-    /// Force WebPKI roots.
-    WebPki,
-    /// Use platform/system trust verification.
-    System,
-}
-
-impl CredentialsTlsRootStore {
-    #[cfg(all(
-        any(feature = "async", feature = "blocking"),
-        any(feature = "credentials-imds", feature = "credentials-sts")
-    ))]
-    pub(crate) const fn into_reqx(self) -> TlsRootStore {
-        match self {
-            Self::BackendDefault => TlsRootStore::BackendDefault,
-            Self::WebPki => TlsRootStore::WebPki,
-            Self::System => TlsRootStore::System,
-        }
-    }
-}
-
 #[cfg(feature = "credentials-sts")]
 #[derive(Clone, Debug)]
 struct StaticCredentialsProvider {
@@ -104,7 +71,7 @@ impl CredentialsProvider for StaticCredentialsProvider {
 #[cfg(feature = "credentials-imds")]
 #[derive(Debug, Clone, Copy)]
 struct ImdsProvider {
-    tls_root_store: CredentialsTlsRootStore,
+    tls_root_store: TlsRootStore,
 }
 
 #[cfg(feature = "credentials-imds")]
@@ -129,7 +96,7 @@ struct StsAssumeRoleProvider {
     role_arn: String,
     role_session_name: String,
     source: DynCredentialsProvider,
-    tls_root_store: CredentialsTlsRootStore,
+    tls_root_store: TlsRootStore,
 }
 
 #[cfg(feature = "credentials-sts")]
@@ -139,10 +106,10 @@ impl CredentialsProvider for StsAssumeRoleProvider {
         Box::pin(async move {
             let source = self.source.credentials_async().await?;
             crate::credentials::sts::assume_role_async(
-                self.region.clone(),
-                self.role_arn.clone(),
-                self.role_session_name.clone(),
-                source.credentials().clone(),
+                &self.region,
+                &self.role_arn,
+                &self.role_session_name,
+                source.credentials(),
                 self.tls_root_store.into_reqx(),
             )
             .await
@@ -153,10 +120,10 @@ impl CredentialsProvider for StsAssumeRoleProvider {
     fn credentials_blocking(&self) -> Result<CredentialsSnapshot> {
         let source = self.source.credentials_blocking()?;
         crate::credentials::sts::assume_role_blocking(
-            self.region.clone(),
-            self.role_arn.clone(),
-            self.role_session_name.clone(),
-            source.credentials().clone(),
+            &self.region,
+            &self.role_arn,
+            &self.role_session_name,
+            source.credentials(),
             self.tls_root_store.into_reqx(),
         )
     }
@@ -165,7 +132,7 @@ impl CredentialsProvider for StsAssumeRoleProvider {
 #[cfg(feature = "credentials-sts")]
 #[derive(Debug, Clone, Copy)]
 struct StsWebIdentityProvider {
-    tls_root_store: CredentialsTlsRootStore,
+    tls_root_store: TlsRootStore,
 }
 
 #[cfg(feature = "credentials-sts")]
@@ -210,7 +177,11 @@ impl Auth {
         Self::Provider(provider)
     }
 
-    /// Loads credentials from a named profile.
+    /// Loads static credentials from a named AWS profile.
+    ///
+    /// The credentials file takes precedence over the config file. The access key,
+    /// secret key, and optional session token must come from the same file.
+    /// Missing files are skipped; malformed or unreadable files return an error.
     #[cfg(feature = "credentials-profile")]
     pub fn from_profile(profile: impl AsRef<str>) -> Result<Self> {
         let creds = crate::credentials::profile::load_profile_credentials(profile.as_ref())?;
@@ -223,33 +194,29 @@ impl Auth {
         Self::from_profile(crate::credentials::profile::profile_from_env()?)
     }
 
-    /// Loads IMDS credentials and wraps them in a cached provider.
+    /// Loads credentials from container metadata or IMDSv2 and caches them.
     #[cfg(all(feature = "credentials-imds", feature = "async"))]
     pub async fn from_imds() -> Result<Self> {
-        Self::from_imds_with_tls_root_store(CredentialsTlsRootStore::BackendDefault).await
+        Self::from_imds_with_tls_root_store(TlsRootStore::BackendDefault).await
     }
 
-    /// Loads IMDS credentials and wraps them in a cached provider.
+    /// Loads credentials from container metadata or IMDSv2 and caches them.
     #[cfg(all(feature = "credentials-imds", feature = "async"))]
-    pub async fn from_imds_with_tls_root_store(
-        tls_root_store: CredentialsTlsRootStore,
-    ) -> Result<Self> {
+    pub async fn from_imds_with_tls_root_store(tls_root_store: TlsRootStore) -> Result<Self> {
         let initial = crate::credentials::imds::load_async(tls_root_store.into_reqx()).await?;
         let provider = CachedProvider::new(ImdsProvider { tls_root_store }).with_initial(initial);
         Ok(Self::Provider(Arc::new(provider)))
     }
 
-    /// Loads IMDS credentials and wraps them in a cached provider.
+    /// Loads credentials from container metadata or IMDSv2 and caches them.
     #[cfg(all(feature = "credentials-imds", feature = "blocking"))]
     pub fn from_imds_blocking() -> Result<Self> {
-        Self::from_imds_blocking_with_tls_root_store(CredentialsTlsRootStore::BackendDefault)
+        Self::from_imds_blocking_with_tls_root_store(TlsRootStore::BackendDefault)
     }
 
-    /// Loads IMDS credentials and wraps them in a cached provider.
+    /// Loads credentials from container metadata or IMDSv2 and caches them.
     #[cfg(all(feature = "credentials-imds", feature = "blocking"))]
-    pub fn from_imds_blocking_with_tls_root_store(
-        tls_root_store: CredentialsTlsRootStore,
-    ) -> Result<Self> {
+    pub fn from_imds_blocking_with_tls_root_store(tls_root_store: TlsRootStore) -> Result<Self> {
         let initial = crate::credentials::imds::load_blocking(tls_root_store.into_reqx())?;
         let provider = CachedProvider::new(ImdsProvider { tls_root_store }).with_initial(initial);
         Ok(Self::Provider(Arc::new(provider)))
@@ -268,7 +235,7 @@ impl Auth {
             role_arn,
             role_session_name,
             source_credentials,
-            CredentialsTlsRootStore::BackendDefault,
+            TlsRootStore::BackendDefault,
         )
         .await
     }
@@ -280,7 +247,7 @@ impl Auth {
         role_arn: impl Into<String>,
         role_session_name: impl Into<String>,
         source_credentials: Credentials,
-        tls_root_store: CredentialsTlsRootStore,
+        tls_root_store: TlsRootStore,
     ) -> Result<Self> {
         Self::assume_role_with_provider_with_tls_root_store(
             region,
@@ -305,7 +272,7 @@ impl Auth {
             role_arn,
             role_session_name,
             source_credentials,
-            CredentialsTlsRootStore::BackendDefault,
+            TlsRootStore::BackendDefault,
         )
     }
 
@@ -316,7 +283,7 @@ impl Auth {
         role_arn: impl Into<String>,
         role_session_name: impl Into<String>,
         source_credentials: Credentials,
-        tls_root_store: CredentialsTlsRootStore,
+        tls_root_store: TlsRootStore,
     ) -> Result<Self> {
         Self::assume_role_with_provider_blocking_with_tls_root_store(
             region,
@@ -328,16 +295,20 @@ impl Auth {
     }
 
     /// Loads web identity credentials from env vars (async).
+    ///
+    /// Requires `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, and `AWS_REGION` or
+    /// `AWS_DEFAULT_REGION`. STS requests always use the configured region's endpoint.
     #[cfg(all(feature = "credentials-sts", feature = "async"))]
     pub async fn from_web_identity_env() -> Result<Self> {
-        Self::from_web_identity_env_with_tls_root_store(CredentialsTlsRootStore::BackendDefault)
-            .await
+        Self::from_web_identity_env_with_tls_root_store(TlsRootStore::BackendDefault).await
     }
 
     /// Loads web identity credentials from env vars and a specific trust root policy (async).
+    ///
+    /// Requires `AWS_REGION` or `AWS_DEFAULT_REGION` for the regional STS endpoint.
     #[cfg(all(feature = "credentials-sts", feature = "async"))]
     pub async fn from_web_identity_env_with_tls_root_store(
-        tls_root_store: CredentialsTlsRootStore,
+        tls_root_store: TlsRootStore,
     ) -> Result<Self> {
         let provider = StsWebIdentityProvider { tls_root_store };
         let initial = provider.credentials_async().await?;
@@ -346,17 +317,20 @@ impl Auth {
     }
 
     /// Loads web identity credentials from env vars (blocking).
+    ///
+    /// Requires `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, and `AWS_REGION` or
+    /// `AWS_DEFAULT_REGION`. STS requests always use the configured region's endpoint.
     #[cfg(all(feature = "credentials-sts", feature = "blocking"))]
     pub fn from_web_identity_env_blocking() -> Result<Self> {
-        Self::from_web_identity_env_blocking_with_tls_root_store(
-            CredentialsTlsRootStore::BackendDefault,
-        )
+        Self::from_web_identity_env_blocking_with_tls_root_store(TlsRootStore::BackendDefault)
     }
 
     /// Loads web identity credentials from env vars and a specific trust root policy (blocking).
+    ///
+    /// Requires `AWS_REGION` or `AWS_DEFAULT_REGION` for the regional STS endpoint.
     #[cfg(all(feature = "credentials-sts", feature = "blocking"))]
     pub fn from_web_identity_env_blocking_with_tls_root_store(
-        tls_root_store: CredentialsTlsRootStore,
+        tls_root_store: TlsRootStore,
     ) -> Result<Self> {
         let provider = StsWebIdentityProvider { tls_root_store };
         let initial = provider.credentials_blocking()?;
@@ -377,7 +351,7 @@ impl Auth {
             role_arn,
             role_session_name,
             source,
-            CredentialsTlsRootStore::BackendDefault,
+            TlsRootStore::BackendDefault,
         )
         .await
     }
@@ -389,7 +363,7 @@ impl Auth {
         role_arn: impl Into<String>,
         role_session_name: impl Into<String>,
         source: DynCredentialsProvider,
-        tls_root_store: CredentialsTlsRootStore,
+        tls_root_store: TlsRootStore,
     ) -> Result<Self> {
         let provider = StsAssumeRoleProvider {
             region,
@@ -416,7 +390,7 @@ impl Auth {
             role_arn,
             role_session_name,
             source,
-            CredentialsTlsRootStore::BackendDefault,
+            TlsRootStore::BackendDefault,
         )
     }
 
@@ -427,7 +401,7 @@ impl Auth {
         role_arn: impl Into<String>,
         role_session_name: impl Into<String>,
         source: DynCredentialsProvider,
-        tls_root_store: CredentialsTlsRootStore,
+        tls_root_store: TlsRootStore,
     ) -> Result<Self> {
         let provider = StsAssumeRoleProvider {
             region,

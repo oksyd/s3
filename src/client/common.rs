@@ -29,9 +29,7 @@ pub(crate) fn sign_with_snapshot(
         resolved,
         headers,
         payload_hash,
-        region,
-        snapshot.credentials(),
-        now,
+        util::signing::SigV4Params::for_s3(region, snapshot.credentials(), now),
     )
 }
 

@@ -1,91 +1,29 @@
-use std::io::Cursor;
 use std::time::Duration;
 
+#[cfg(test)]
 use bytes::Bytes;
+#[cfg(test)]
+use http::StatusCode;
 use http::header::USER_AGENT;
-use http::{HeaderMap, HeaderValue, Method, StatusCode};
-use reqx::{advanced::TlsRootStore, prelude::RedirectPolicy};
+use http::{HeaderMap, HeaderValue, Method};
+use reqx::{
+    advanced::TlsRootStore,
+    prelude::{RedirectPolicy, RetryPolicy, StatusPolicy},
+};
 use url::Url;
 
 use crate::{
-    error::{Error, Result},
+    error::Result,
     transport::{
-        MAX_BUFFERED_RESPONSE_BODY_BYTES, RequestAttemptState, RequestTimer, RetryConfig,
-        ServiceErrorAction, TransportRequestBody, content_length_header_value,
-        content_length_header_value_from_len, default_tls_backend, ensure_method_accepts_body,
-        map_reqx_error, prepare_user_agent, record_service_retry, reqx_backoff_source,
-        reqx_retry_policy, response_error_from_status, service_error_action,
+        MAX_BUFFERED_RESPONSE_BODY_BYTES, MAX_ERROR_RESPONSE_BODY_BYTES, RequestBody, RequestTimer,
+        RetryConfig, default_tls_backend, ensure_method_accepts_body, map_reqx_error,
+        prepare_user_agent, record_retry, record_service_error, response_error,
+        response_error_if_any, service_retry_delay, transport_retry_delay,
         validate_request_timeout,
     },
 };
 
-pub(crate) enum BlockingBody {
-    Empty,
-    Bytes(Bytes),
-    Reader {
-        reader: Box<dyn std::io::Read + Send + 'static>,
-        content_length: Option<u64>,
-    },
-}
-
-impl TransportRequestBody for BlockingBody {
-    fn is_empty(&self) -> bool {
-        matches!(self, Self::Empty)
-    }
-
-    fn is_replayable(&self) -> bool {
-        matches!(self, Self::Empty | Self::Bytes(_))
-    }
-
-    fn clone_for_retry(&self) -> Option<Self> {
-        match self {
-            Self::Empty => Some(Self::Empty),
-            Self::Bytes(b) => Some(Self::Bytes(b.clone())),
-            Self::Reader { .. } => None,
-        }
-    }
-}
-
-pub(crate) struct BlockingResponseBody {
-    body: Bytes,
-}
-
-impl BlockingResponseBody {
-    pub(crate) fn into_reader(self) -> Cursor<Bytes> {
-        Cursor::new(self.body)
-    }
-}
-
-pub(crate) struct BlockingResponse {
-    status: StatusCode,
-    headers: HeaderMap,
-    body: Bytes,
-}
-
-impl BlockingResponse {
-    fn from_reqx(resp: reqx::Response) -> Self {
-        Self {
-            status: resp.status(),
-            headers: resp.headers().clone(),
-            body: resp.body().clone(),
-        }
-    }
-
-    pub(crate) fn status(&self) -> StatusCode {
-        self.status
-    }
-
-    pub(crate) fn headers(&self) -> &HeaderMap {
-        &self.headers
-    }
-
-    pub(crate) fn into_parts(self) -> (http::response::Parts, BlockingResponseBody) {
-        let mut response = http::Response::new(BlockingResponseBody { body: self.body });
-        *response.status_mut() = self.status;
-        *response.headers_mut() = self.headers;
-        response.into_parts()
-    }
-}
+pub(crate) type BlockingBody = RequestBody<Box<dyn std::io::Read + Send + 'static>>;
 
 pub(crate) struct BlockingTransport {
     client: reqx::blocking::Client,
@@ -106,9 +44,9 @@ impl BlockingTransport {
 
         let mut builder = reqx::blocking::Client::builder("http://localhost")
             .client_name(user_agent_text)
-            .retry_policy(reqx_retry_policy(retry))
-            .backoff_source(reqx_backoff_source(retry))
+            .retry_policy(RetryPolicy::disabled())
             .redirect_policy(RedirectPolicy::none())
+            .default_status_policy(StatusPolicy::Response)
             .max_response_body_bytes(MAX_BUFFERED_RESPONSE_BODY_BYTES)
             .tls_backend(default_tls_backend())
             .tls_root_store(tls_root_store);
@@ -116,8 +54,12 @@ impl BlockingTransport {
         #[cfg(feature = "metrics")]
         {
             builder = builder
-                .observer(crate::transport::TransportMetricsObserver)
-                .interceptor(crate::transport::TransportMetricsInterceptor);
+                .observer(std::sync::Arc::new(
+                    crate::transport::TransportMetricsObserver,
+                ))
+                .interceptor(std::sync::Arc::new(
+                    crate::transport::TransportMetricsInterceptor,
+                ));
         }
 
         if let Some(timeout) = timeout {
@@ -140,44 +82,49 @@ impl BlockingTransport {
         method: Method,
         url: Url,
         headers: HeaderMap,
-        body: BlockingBody,
-    ) -> Result<BlockingResponse> {
-        let mut attempts = RequestAttemptState::new(self.retry, body);
-        let max_attempts = attempts.max_attempts();
-        let timer = RequestTimer::start();
+        mut body: BlockingBody,
+    ) -> Result<reqx::Response> {
+        let max_attempts = if body.is_replayable() {
+            self.retry.max_attempts
+        } else {
+            1
+        };
+        let mut attempt = 1;
+        let _timer = RequestTimer::start(&method);
 
-        for attempt in 1..=max_attempts {
-            let current_body = attempts.next_body()?;
-            let req = self.build_request(&method, url.clone(), headers.clone(), current_body)?;
-            let resp = req
-                .send_response()
-                .map_err(|err| map_reqx_error("request failed", err))?;
-            if let Some(action) = service_error_action(
-                self.retry,
-                attempt,
-                max_attempts,
-                &method,
-                resp.status(),
-                resp.headers(),
-                resp.body(),
-            ) {
-                match action {
-                    ServiceErrorAction::RetryAfter(delay) => {
-                        record_service_retry(&method);
+        loop {
+            let current_body = body.take_for_attempt();
+            let req = self.build_request(&method, &url, &headers, current_body)?;
+            let resp = match req.send() {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if let Some(delay) =
+                        transport_retry_delay(self.retry, attempt, max_attempts, &method, &err)
+                    {
+                        record_retry(&method, "transport");
                         std::thread::sleep(delay);
+                        attempt += 1;
                         continue;
                     }
-                    ServiceErrorAction::ReturnErr(err) => {
-                        timer.finish_service_error(&method);
-                        return Err(err);
-                    }
+                    return Err(map_reqx_error("request failed", err));
                 }
+            };
+            if let Some(error) = response_error_if_any(&resp) {
+                if let Some(delay) =
+                    service_retry_delay(self.retry, attempt, max_attempts, &method, &error)
+                {
+                    drop(resp);
+                    record_retry(&method, "service");
+                    std::thread::sleep(delay);
+                    attempt += 1;
+                    continue;
+                }
+                record_service_error(&method);
+                return Err(error);
             }
-            timer.finish(&method);
-            return Ok(BlockingResponse::from_reqx(resp));
-        }
 
-        Err(Error::transport("request failed after retries", None))
+            return Ok(resp);
+        }
     }
 
     pub(crate) fn send_stream(
@@ -185,47 +132,73 @@ impl BlockingTransport {
         method: Method,
         url: Url,
         headers: HeaderMap,
-        body: BlockingBody,
+        mut body: BlockingBody,
     ) -> Result<reqx::blocking::ResponseStream> {
-        let mut attempts = RequestAttemptState::new(self.retry, body);
-        let max_attempts = attempts.max_attempts();
-        let timer = RequestTimer::start();
+        let max_attempts = if body.is_replayable() {
+            self.retry.max_attempts
+        } else {
+            1
+        };
+        let mut attempt = 1;
+        let _timer = RequestTimer::start(&method);
 
-        for attempt in 1..=max_attempts {
-            let current_body = attempts.next_body()?;
-            let req = self.build_request(&method, url.clone(), headers.clone(), current_body)?;
-            let resp = req
-                .send_response_stream()
-                .map_err(|err| map_reqx_error("request failed", err))?;
+        loop {
+            let current_body = body.take_for_attempt();
+            let req = self.build_request(&method, &url, &headers, current_body)?;
+            let resp = match req.send_stream() {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if let Some(delay) =
+                        transport_retry_delay(self.retry, attempt, max_attempts, &method, &err)
+                    {
+                        record_retry(&method, "transport");
+                        std::thread::sleep(delay);
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(map_reqx_error("request failed", err));
+                }
+            };
 
-            if let Some(ServiceErrorAction::RetryAfter(delay)) = service_error_action(
-                self.retry,
-                attempt,
-                max_attempts,
-                &method,
-                resp.status(),
-                resp.headers(),
-                b"",
-            ) {
-                record_service_retry(&method);
-                std::thread::sleep(delay);
-                continue;
+            if resp.status().is_success() {
+                return Ok(resp);
             }
 
-            timer.finish(&method);
-            return Ok(resp);
+            let response = match resp.into_response_limited(MAX_ERROR_RESPONSE_BODY_BYTES) {
+                Ok(response) => response,
+                Err(error) => {
+                    if let Some(delay) =
+                        transport_retry_delay(self.retry, attempt, max_attempts, &method, &error)
+                    {
+                        record_retry(&method, "transport");
+                        std::thread::sleep(delay);
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(map_reqx_error("failed to read error response", error));
+                }
+            };
+            let error = response_error(response);
+            if let Some(delay) =
+                service_retry_delay(self.retry, attempt, max_attempts, &method, &error)
+            {
+                record_retry(&method, "service");
+                std::thread::sleep(delay);
+                attempt += 1;
+                continue;
+            }
+            record_service_error(&method);
+            return Err(error);
         }
-
-        Err(Error::transport("request failed after retries", None))
     }
 
     fn build_request(
         &self,
         method: &Method,
-        url: Url,
-        headers: HeaderMap,
+        url: &Url,
+        headers: &HeaderMap,
         body: BlockingBody,
-    ) -> Result<reqx::blocking::RequestBuilder<'_>> {
+    ) -> Result<reqx::blocking::RequestBuilder> {
         ensure_method_accepts_body(method, &body)?;
 
         let mut req = self
@@ -233,31 +206,21 @@ impl BlockingTransport {
             .request(method.clone(), url.as_str().to_string())
             .header(USER_AGENT, self.user_agent.clone());
 
-        for (name, value) in headers {
-            if let Some(name) = name {
-                req = req.header(name, value);
-            }
+        for name in headers.keys() {
+            req = req.header(name.clone(), headers[name].clone());
         }
 
         req = match body {
             BlockingBody::Empty => req,
-            BlockingBody::Bytes(b) => req
-                .header(
-                    http::header::CONTENT_LENGTH,
-                    content_length_header_value_from_len(b.len())?,
-                )
-                .body(b),
-            BlockingBody::Reader {
-                reader,
+            BlockingBody::Bytes(b) => req.body(b),
+            BlockingBody::Stream {
+                stream: reader,
                 content_length: Some(len),
             } => req
-                .header(
-                    http::header::CONTENT_LENGTH,
-                    content_length_header_value(len)?,
-                )
+                .header(http::header::CONTENT_LENGTH, HeaderValue::from(len))
                 .body_reader(reader),
-            BlockingBody::Reader {
-                reader,
+            BlockingBody::Stream {
+                stream: reader,
                 content_length: None,
             } => req.body_reader(reader),
         };
@@ -266,12 +229,9 @@ impl BlockingTransport {
     }
 }
 
-pub(crate) fn response_error(status: StatusCode, headers: &http::HeaderMap, body: &str) -> Error {
-    response_error_from_status(status, headers, body)
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::Error;
     use std::io::{ErrorKind, Read, Write};
     use std::net::{SocketAddr, TcpListener};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -279,6 +239,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::transport::response_error_from_status;
 
     mod reqx {
         pub use ::reqx::advanced::TlsRootStore;
@@ -450,13 +411,15 @@ mod tests {
             http::HeaderValue::from_static("3"),
         );
 
-        let err = response_error(StatusCode::TOO_MANY_REQUESTS, &headers, "slow down");
+        let err = response_error_from_status(StatusCode::TOO_MANY_REQUESTS, &headers, "slow down");
         match err {
-            Error::RateLimited {
-                retry_after,
-                request_id,
-                ..
-            } => {
+            Error::Api(error) => {
+                assert!(error.is_rate_limited());
+                let crate::ApiError {
+                    retry_after,
+                    request_id,
+                    ..
+                } = *error;
                 assert_eq!(retry_after, Some(Duration::from_secs(3)));
                 assert_eq!(request_id.as_deref(), Some("req-1"));
             }
@@ -481,16 +444,18 @@ mod tests {
 </Error>
 "#;
 
-        let err = response_error(StatusCode::FORBIDDEN, &headers, body);
+        let err = response_error_from_status(StatusCode::FORBIDDEN, &headers, body);
         match err {
-            Error::Api {
-                status,
-                code,
-                message,
-                request_id,
-                host_id,
-                body_snippet,
-            } => {
+            Error::Api(error) => {
+                let crate::ApiError {
+                    status,
+                    code,
+                    message,
+                    request_id,
+                    host_id,
+                    body_snippet,
+                    ..
+                } = *error;
                 assert_eq!(status, StatusCode::FORBIDDEN);
                 assert_eq!(code.as_deref(), Some("AccessDenied"));
                 assert_eq!(message.as_deref(), Some("Access Denied"));
@@ -503,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn send_returns_response_for_http_error_status() -> Result<()> {
+    fn send_returns_api_error_for_http_error_status() -> Result<()> {
         let (addr, handle, hits) = spawn_test_server(vec![
             b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
         ])?;
@@ -525,9 +490,9 @@ mod tests {
         handle
             .join()
             .map_err(|_| Error::transport("test server thread panicked", None))?;
-        let resp = resp_result?;
+        let resp = resp_result.expect_err("expected service error");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status().unwrap(), StatusCode::NOT_FOUND);
         Ok(())
     }
 
@@ -600,15 +565,13 @@ mod tests {
 
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(resp.status(), StatusCode::OK);
-        let (parts, body) = resp.into_parts();
         assert_eq!(
-            parts
-                .headers
+            resp.headers()
                 .get(http::header::CONTENT_ENCODING)
                 .and_then(|v| v.to_str().ok()),
             Some("zstd")
         );
-        assert!(body.into_reader().into_inner().is_empty());
+        assert!(resp.body().is_empty());
         Ok(())
     }
 
@@ -633,13 +596,62 @@ mod tests {
         let url = Url::parse(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
-        let resp = transport.send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty)?;
+        let resp = transport
+            .send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty)
+            .expect_err("expected service error");
         handle
             .join()
             .map_err(|_| Error::transport("test server thread panicked", None))?;
 
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status().unwrap(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[test]
+    fn retry_limit_includes_transport_and_service_failures() -> Result<()> {
+        for streaming in [false, true] {
+            let (addr, handle, hits) = spawn_test_server(vec![
+                Vec::new(),
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            ])?;
+            let transport = BlockingTransport::new(
+                RetryConfig {
+                    max_attempts: 2,
+                    base_delay: Duration::ZERO,
+                    max_delay: Duration::ZERO,
+                    ..RetryConfig::default()
+                },
+                None,
+                Some(Duration::from_secs(5)),
+                reqx::TlsRootStore::BackendDefault,
+            )?;
+            let url = Url::parse(&format!("http://{addr}/"))
+                .map_err(|_| Error::invalid_config("invalid test server URL"))?;
+            let status = if streaming {
+                transport
+                    .send_stream(Method::GET, url, HeaderMap::new(), BlockingBody::Empty)
+                    .expect_err("expected service error")
+                    .status()
+                    .unwrap()
+            } else {
+                transport
+                    .send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty)
+                    .expect_err("expected service error")
+                    .status()
+                    .unwrap()
+            };
+            handle
+                .join()
+                .map_err(|_| Error::transport("test server thread panicked", None))?;
+            assert_eq!(hits.load(Ordering::SeqCst), 2, "streaming={streaming}");
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "streaming={streaming}"
+            );
+        }
         Ok(())
     }
 
@@ -700,13 +712,15 @@ mod tests {
         let url = Url::parse(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
-        let resp = transport.send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty)?;
+        let resp = transport
+            .send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty)
+            .expect_err("expected service error");
         handle
             .join()
             .map_err(|_| Error::transport("test server thread panicked", None))?;
 
         assert_eq!(hits.load(Ordering::SeqCst), 2);
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status().unwrap(), StatusCode::SERVICE_UNAVAILABLE);
         Ok(())
     }
 
@@ -733,18 +747,20 @@ mod tests {
         let url = Url::parse(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
-        let resp = transport.send(
-            Method::POST,
-            url,
-            HeaderMap::new(),
-            BlockingBody::Bytes(Bytes::from_static(b"hello")),
-        )?;
+        let resp = transport
+            .send(
+                Method::POST,
+                url,
+                HeaderMap::new(),
+                BlockingBody::Bytes(Bytes::from_static(b"hello")),
+            )
+            .expect_err("expected service error");
         handle
             .join()
             .map_err(|_| Error::transport("test server thread panicked", None))?;
 
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status().unwrap(), StatusCode::SERVICE_UNAVAILABLE);
         Ok(())
     }
 
@@ -1001,7 +1017,7 @@ mod tests {
 
     #[test]
     fn send_stream_into_response_limited_enforces_limit() -> Result<()> {
-        let payload = "x".repeat(2048);
+        let payload = "x".repeat(MAX_ERROR_RESPONSE_BODY_BYTES + 1);
         let response = format!(
             "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             payload.len(),
@@ -1019,13 +1035,23 @@ mod tests {
         let url = Url::parse(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
-        let resp =
-            transport.send_stream(Method::GET, url, HeaderMap::new(), BlockingBody::Empty)?;
-        let limited = resp.into_response_limited(1024);
+        let limited =
+            transport.send_stream(Method::GET, url, HeaderMap::new(), BlockingBody::Empty);
         handle
             .join()
             .map_err(|_| Error::transport("test server thread panicked", None))?;
-        assert!(limited.is_err(), "expected body limit error");
+        let error = limited.expect_err("oversized error response must fail");
+        let Error::Transport {
+            source: Some(source),
+            ..
+        } = error
+        else {
+            panic!("expected body limit error");
+        };
+        assert!(
+            source.to_string().contains("response_body_too_large"),
+            "{source}"
+        );
         Ok(())
     }
 
@@ -1051,9 +1077,9 @@ mod tests {
             .join()
             .map_err(|_| Error::transport("test server thread panicked", None))?;
 
-        let resp = outcome?;
+        let resp = outcome.expect_err("redirect must fail");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(resp.status().unwrap(), StatusCode::MOVED_PERMANENTLY);
         Ok(())
     }
 
@@ -1078,22 +1104,41 @@ mod tests {
             .join()
             .map_err(|_| Error::transport("test server thread panicked", None))?;
 
-        let resp = outcome?;
+        let resp = outcome.expect_err("redirect must fail");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert_eq!(resp.status(), StatusCode::FOUND);
+        assert_eq!(resp.status().unwrap(), StatusCode::FOUND);
         Ok(())
     }
 
     #[test]
-    fn followed_redirect_treats_unparseable_different_uri_as_redirect() {
-        let request_url = Url::parse("https://example.com/path?x=1").expect("valid URL");
-        assert!(!crate::transport::followed_redirect(
-            &request_url,
-            request_url.as_str()
-        ));
-        assert!(crate::transport::followed_redirect(
-            &request_url,
-            "not-a-valid-uri"
-        ));
+    fn object_download_retries_service_codes_and_preserves_xml_objects() -> Result<()> {
+        let error_body = "<Error><Code>SlowDown</Code></Error>";
+        let object_body = b"<Error><Code>AccessDenied</Code></Error>";
+        let failures = [
+            format!("HTTP/1.1 400 Bad Request\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", error_body.len(), error_body).into_bytes(),
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 100\r\nConnection: close\r\n\r\ntruncated".to_vec(),
+        ];
+        for failure in failures {
+            let (addr, handle, hits) = spawn_test_server(vec![
+                failure,
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    object_body.len(),
+                    std::str::from_utf8(object_body).unwrap()
+                )
+                .into_bytes(),
+            ])?;
+            let client = crate::BlockingClient::builder(format!("http://{addr}"))?
+                .region("us-east-1")
+                .max_attempts(2)
+                .build()?;
+            let object = client.objects().get("bucket", "key").send()?;
+            let mut body = Vec::new();
+            object.write_to(&mut body)?;
+            handle.join().unwrap();
+            assert_eq!(hits.load(Ordering::SeqCst), 2);
+            assert_eq!(body, object_body);
+        }
+        Ok(())
     }
 }

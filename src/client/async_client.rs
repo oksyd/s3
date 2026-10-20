@@ -1,7 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{borrow::Cow, sync::Arc, time::Duration};
 
+use crate::TlsRootStore;
 use http::{HeaderMap, Method};
-use reqx::advanced::TlsRootStore;
 use time::OffsetDateTime;
 use url::Url;
 
@@ -11,26 +11,9 @@ use crate::{
     api,
     auth::{AddressingStyle, Auth, Region},
     error::{Error, Result},
-    transport::async_transport::{AsyncBody, AsyncResponse, AsyncTransport},
+    transport::async_transport::{AsyncBody, AsyncTransport},
     util,
 };
-
-/// Trust root selection for async HTTPS requests.
-///
-/// This only affects the async transport when using HTTPS.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum AsyncTlsRootStore {
-    /// Use the backend default trust roots.
-    ///
-    /// For `rustls`, this maps to WebPKI roots.
-    /// For `native-tls`, this follows the backend default behavior.
-    #[default]
-    BackendDefault,
-    /// Force WebPKI roots.
-    WebPki,
-    /// Use platform/system trust verification.
-    System,
-}
 
 /// Async S3 client.
 ///
@@ -53,7 +36,7 @@ pub struct ClientBuilder {
     retry: crate::transport::RetryConfig,
     timeout: Option<Duration>,
     user_agent: Option<String>,
-    tls_root_store: AsyncTlsRootStore,
+    tls_root_store: TlsRootStore,
 }
 
 struct Inner {
@@ -98,48 +81,25 @@ impl Client {
         query_params: Vec<(String, String)>,
         mut headers: HeaderMap,
         body: AsyncBody,
-    ) -> Result<AsyncResponse> {
+    ) -> Result<reqx::Response> {
         #[cfg(feature = "tracing")]
-        let _guard = tracing::info_span!(
+        let span = tracing::info_span!(
             "s3.request",
             method = %method,
             bucket_present = bucket.is_some(),
             key_present = key.is_some(),
             host = crate::transport::redacted_host_for_trace(&self.inner.endpoint),
-        )
-        .entered();
+        );
 
-        let resolved = util::url::resolve_url(
-            &self.inner.endpoint,
-            bucket,
-            key,
-            &query_params,
-            self.inner.addressing,
-        )?;
-
-        if let Some(snapshot) = self.inner.auth.credentials_snapshot_async().await? {
-            let now = OffsetDateTime::now_utc();
-            let payload_hash = match &body {
-                AsyncBody::Empty => util::signing::payload_hash_empty(),
-                AsyncBody::Bytes(b) => util::signing::payload_hash_bytes(b),
-                AsyncBody::Stream { .. } => util::signing::UNSIGNED_PAYLOAD.to_string(),
-            };
-
-            sign_with_snapshot(
-                &method,
-                &resolved,
-                &mut headers,
-                &payload_hash,
-                &self.inner.region,
-                &snapshot,
-                now,
-            )?;
-        }
-
-        self.inner
-            .transport
-            .send(method, resolved.url, headers, body)
-            .await
+        let request = async {
+            let (url, body) = self
+                .prepare_request(&method, bucket, key, &query_params, &mut headers, body)
+                .await?;
+            self.inner.transport.send(method, url, headers, body).await
+        };
+        #[cfg(feature = "tracing")]
+        let request = tracing::Instrument::instrument(request, span);
+        request.await
     }
 
     pub(crate) async fn execute_stream(
@@ -151,26 +111,58 @@ impl Client {
         mut headers: HeaderMap,
         body: AsyncBody,
     ) -> Result<reqx::ResponseStream> {
+        #[cfg(feature = "tracing")]
+        let span = tracing::info_span!(
+            "s3.request",
+            method = %method,
+            bucket_present = bucket.is_some(),
+            key_present = key.is_some(),
+            host = crate::transport::redacted_host_for_trace(&self.inner.endpoint),
+        );
+
+        let request = async {
+            let (url, body) = self
+                .prepare_request(&method, bucket, key, &query_params, &mut headers, body)
+                .await?;
+            self.inner
+                .transport
+                .send_stream(method, url, headers, body)
+                .await
+        };
+        #[cfg(feature = "tracing")]
+        let request = tracing::Instrument::instrument(request, span);
+        request.await
+    }
+
+    async fn prepare_request(
+        &self,
+        method: &Method,
+        bucket: Option<&str>,
+        key: Option<&str>,
+        query_params: &[(String, String)],
+        headers: &mut HeaderMap,
+        body: AsyncBody,
+    ) -> Result<(Url, AsyncBody)> {
         let resolved = util::url::resolve_url(
             &self.inner.endpoint,
             bucket,
             key,
-            &query_params,
+            query_params,
             self.inner.addressing,
         )?;
 
         if let Some(snapshot) = self.inner.auth.credentials_snapshot_async().await? {
             let now = OffsetDateTime::now_utc();
             let payload_hash = match &body {
-                AsyncBody::Empty => util::signing::payload_hash_empty(),
-                AsyncBody::Bytes(b) => util::signing::payload_hash_bytes(b),
-                AsyncBody::Stream { .. } => util::signing::UNSIGNED_PAYLOAD.to_string(),
+                AsyncBody::Empty => Cow::Borrowed(util::signing::EMPTY_PAYLOAD_HASH),
+                AsyncBody::Bytes(b) => Cow::Owned(util::signing::sha256_hex(b)),
+                AsyncBody::Stream { .. } => Cow::Borrowed(util::signing::UNSIGNED_PAYLOAD),
             };
 
             sign_with_snapshot(
-                &method,
+                method,
                 &resolved,
-                &mut headers,
+                headers,
                 &payload_hash,
                 &self.inner.region,
                 &snapshot,
@@ -178,10 +170,7 @@ impl Client {
             )?;
         }
 
-        self.inner
-            .transport
-            .send_stream(method, resolved.url, headers, body)
-            .await
+        Ok((resolved.url, body))
     }
 
     pub(crate) fn presign(
@@ -195,7 +184,7 @@ impl Client {
     ) -> Result<crate::types::PresignedRequest> {
         let creds = self.inner.auth.static_credentials().ok_or_else(|| {
             Error::invalid_config(
-                "presign requires static credentials; use Presign*Request::build_async for credential providers",
+                "presign requires static credentials; use PresignObjectRequest::build_async for credential providers",
             )
         })?;
 
@@ -203,7 +192,7 @@ impl Client {
             &self.inner.endpoint,
             Some(bucket),
             Some(key),
-            &query_params,
+            &[],
             self.inner.addressing,
         )?;
 
@@ -213,8 +202,8 @@ impl Client {
             resolved,
             util::signing::SigV4Params::for_s3(&self.inner.region, creds, now),
             expires_in,
-            &query_params,
-            &headers,
+            query_params,
+            headers,
         )
     }
 
@@ -238,7 +227,7 @@ impl Client {
             &self.inner.endpoint,
             Some(bucket),
             Some(key),
-            &query_params,
+            &[],
             self.inner.addressing,
         )?;
 
@@ -250,8 +239,8 @@ impl Client {
             resolved,
             util::signing::SigV4Params::for_s3(&self.inner.region, snapshot.credentials(), now),
             expires_in,
-            &query_params,
-            &headers,
+            query_params,
+            headers,
         )
     }
 }
@@ -268,7 +257,7 @@ impl ClientBuilder {
             retry: crate::transport::RetryConfig::default(),
             timeout: None,
             user_agent: None,
-            tls_root_store: AsyncTlsRootStore::BackendDefault,
+            tls_root_store: TlsRootStore::BackendDefault,
         })
     }
 
@@ -296,7 +285,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Sets the maximum number of retry attempts.
+    /// Sets the maximum number of attempts, including the initial request.
     pub fn max_attempts(mut self, max_attempts: u32) -> Self {
         self.retry.max_attempts = max_attempts;
         self
@@ -330,7 +319,7 @@ impl ClientBuilder {
     ///
     /// Builder default is `BackendDefault`.
     /// Use `System` for enterprise/private PKI environments that rely on OS trust stores.
-    pub fn tls_root_store(mut self, tls_root_store: AsyncTlsRootStore) -> Self {
+    pub fn tls_root_store(mut self, tls_root_store: TlsRootStore) -> Self {
         self.tls_root_store = tls_root_store;
         self
     }
@@ -363,16 +352,6 @@ impl ClientBuilder {
     }
 }
 
-impl AsyncTlsRootStore {
-    pub(crate) const fn into_reqx(self) -> TlsRootStore {
-        match self {
-            Self::BackendDefault => TlsRootStore::BackendDefault,
-            Self::WebPki => TlsRootStore::WebPki,
-            Self::System => TlsRootStore::System,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,15 +378,15 @@ mod tests {
     #[test]
     fn builder_defaults_tls_root_store_to_backend_default() {
         let builder = ClientBuilder::new("https://s3.example.com").expect("builder should parse");
-        assert_eq!(builder.tls_root_store, AsyncTlsRootStore::BackendDefault);
+        assert_eq!(builder.tls_root_store, TlsRootStore::BackendDefault);
     }
 
     #[test]
     fn builder_tls_root_store_override_is_applied() {
         let builder = ClientBuilder::new("https://s3.example.com")
             .expect("builder should parse")
-            .tls_root_store(AsyncTlsRootStore::System);
-        assert_eq!(builder.tls_root_store, AsyncTlsRootStore::System);
+            .tls_root_store(TlsRootStore::System);
+        assert_eq!(builder.tls_root_store, TlsRootStore::System);
     }
 
     #[test]
@@ -449,7 +428,7 @@ mod tests {
             .expect("builder should parse")
             .region("us-east-1")
             .auth(Auth::Anonymous)
-            .tls_root_store(AsyncTlsRootStore::WebPki)
+            .tls_root_store(TlsRootStore::WebPki)
             .build();
         assert!(client.is_ok(), "rustls should accept WebPki root store");
     }
@@ -476,7 +455,7 @@ mod tests {
 
         match err {
             Error::InvalidConfig { message } => {
-                assert!(message.contains("Presign*Request::build_async"));
+                assert!(message.contains("PresignObjectRequest::build_async"));
             }
             other => panic!("expected invalid config error, got {other:?}"),
         }
@@ -489,7 +468,7 @@ mod tests {
             .expect("builder should parse")
             .region("us-east-1")
             .auth(Auth::Anonymous)
-            .tls_root_store(AsyncTlsRootStore::WebPki)
+            .tls_root_store(TlsRootStore::WebPki)
             .build()
         {
             Ok(_) => panic!("native-tls should reject WebPki root store"),

@@ -2,23 +2,22 @@
 use std::env;
 
 #[cfg(feature = "blocking")]
-use s3::{Auth, BlockingClient, BlockingTlsRootStore};
+use s3::{Auth, BlockingClient, TlsRootStore};
 
 #[cfg(feature = "blocking")]
-fn tls_root_store_from_env() -> BlockingTlsRootStore {
+fn tls_root_store_from_env() -> TlsRootStore {
     match env::var("S3_TLS_ROOT_STORE")
         .unwrap_or_default()
         .to_ascii_lowercase()
         .as_str()
     {
-        "webpki" => BlockingTlsRootStore::WebPki,
-        "system" => BlockingTlsRootStore::System,
-        _ => BlockingTlsRootStore::BackendDefault,
+        "webpki" => TlsRootStore::WebPki,
+        "system" => TlsRootStore::System,
+        _ => TlsRootStore::BackendDefault,
     }
 }
 
 #[cfg(feature = "blocking")]
-#[allow(clippy::result_large_err)]
 fn main() -> Result<(), s3::Error> {
     let endpoint = match env::var("S3_TEST_ENDPOINT") {
         Ok(v) => v,

@@ -2,11 +2,6 @@
 use crate::Error;
 #[cfg(feature = "blocking")]
 use crate::Result;
-#[cfg(all(
-    any(feature = "async", feature = "blocking"),
-    any(feature = "credentials-imds", feature = "credentials-sts")
-))]
-use reqx::advanced::TlsRootStore;
 #[cfg(feature = "blocking")]
 use std::sync::Condvar;
 #[cfg(any(feature = "async", feature = "blocking"))]
@@ -60,26 +55,6 @@ fn credentials_validate_and_redact_in_debug() {
     assert!(!dbg.contains("SECRET1234567890"));
     assert!(!dbg.contains("TOKEN1234567890"));
     assert!(dbg.contains("<redacted>"));
-}
-
-#[cfg(all(
-    any(feature = "async", feature = "blocking"),
-    any(feature = "credentials-imds", feature = "credentials-sts")
-))]
-#[test]
-fn credentials_tls_root_store_maps_to_reqx_variants() {
-    assert_eq!(
-        CredentialsTlsRootStore::BackendDefault.into_reqx(),
-        TlsRootStore::BackendDefault
-    );
-    assert_eq!(
-        CredentialsTlsRootStore::WebPki.into_reqx(),
-        TlsRootStore::WebPki
-    );
-    assert_eq!(
-        CredentialsTlsRootStore::System.into_reqx(),
-        TlsRootStore::System
-    );
 }
 
 #[cfg(any(feature = "async", feature = "blocking"))]
@@ -294,6 +269,92 @@ async fn cached_provider_singleflight_refresh_async() {
         assert_eq!(key, "AKIA_TEST");
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn cached_provider_recovers_and_wakes_waiters_after_cancelled_refresh() {
+    #[derive(Debug)]
+    struct CancelFirstProvider(AtomicUsize);
+
+    impl CredentialsProvider for CancelFirstProvider {
+        fn credentials_async(&self) -> CredentialsFuture<'_> {
+            Box::pin(async {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    std::future::pending::<()>().await;
+                }
+                Ok(CredentialsSnapshot::new(
+                    Credentials::new("AKIA_RECOVERED", "SECRET_TEST").unwrap(),
+                ))
+            })
+        }
+
+        #[cfg(feature = "blocking")]
+        fn credentials_blocking(&self) -> Result<CredentialsSnapshot> {
+            Err(Error::invalid_config("async test provider"))
+        }
+    }
+
+    let cached = std::sync::Arc::new(
+        CachedProvider::new(CancelFirstProvider(AtomicUsize::new(0)))
+            .min_refresh_interval(Duration::ZERO),
+    );
+    let mut refresh = cached.credentials_async();
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(refresh.as_mut().poll(&mut cx).is_pending());
+
+    let waiter = {
+        let cached = cached.clone();
+        tokio::spawn(async move { cached.credentials_async().await })
+    };
+    tokio::task::yield_now().await;
+    assert_eq!(cached.inner.0.load(Ordering::SeqCst), 1);
+    drop(refresh);
+
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), waiter)
+        .await
+        .expect("cancelled refresh must wake waiters")
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.credentials().access_key_id(), "AKIA_RECOVERED");
+    assert_eq!(cached.inner.0.load(Ordering::SeqCst), 2);
+}
+
+#[cfg(feature = "blocking")]
+#[test]
+fn cached_provider_recovers_after_provider_panics() {
+    #[derive(Debug)]
+    struct PanicFirstProvider(AtomicUsize);
+
+    impl CredentialsProvider for PanicFirstProvider {
+        #[cfg(feature = "async")]
+        fn credentials_async(&self) -> CredentialsFuture<'_> {
+            Box::pin(async { self.credentials_blocking() })
+        }
+
+        fn credentials_blocking(&self) -> Result<CredentialsSnapshot> {
+            assert_ne!(
+                self.0.fetch_add(1, Ordering::SeqCst),
+                0,
+                "provider panicked"
+            );
+            Ok(CredentialsSnapshot::new(
+                Credentials::new("AKIA_RECOVERED", "SECRET_TEST").unwrap(),
+            ))
+        }
+    }
+
+    let cached = CachedProvider::new(PanicFirstProvider(AtomicUsize::new(0)))
+        .min_refresh_interval(Duration::ZERO);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cached.credentials_blocking()
+        }))
+        .is_err()
+    );
+    let snapshot = cached.credentials_blocking().unwrap();
+    assert_eq!(snapshot.credentials().access_key_id(), "AKIA_RECOVERED");
+    assert_eq!(cached.inner.0.load(Ordering::SeqCst), 2);
 }
 
 #[cfg(feature = "async")]

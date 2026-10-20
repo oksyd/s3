@@ -1,11 +1,11 @@
 //! Blocking bucket operations.
 
 use bytes::Bytes;
-use http::{HeaderMap, Method, StatusCode};
+use http::{HeaderMap, Method};
 
-use super::blocking_common::{parse_blocking_xml_response, read_body_string, read_response_error};
 use super::common::{
-    create_bucket_location_constraint, require_configured, validate_subresource, xml_body_headers,
+    create_bucket_location_constraint, parse_xml_response, require_configured,
+    validate_subresource, xml_body_headers,
 };
 
 use crate::{
@@ -15,11 +15,7 @@ use crate::{
     types::{
         BucketCorsConfiguration, BucketEncryptionConfiguration, BucketLifecycleConfiguration,
         BucketPublicAccessBlockConfiguration, BucketTagging, BucketVersioningConfiguration,
-        CreateBucketOutput, DeleteBucketCorsOutput, DeleteBucketEncryptionOutput,
-        DeleteBucketLifecycleOutput, DeleteBucketOutput, DeleteBucketPublicAccessBlockOutput,
-        DeleteBucketTaggingOutput, HeadBucketOutput, ListBucketsOutput, PutBucketCorsOutput,
-        PutBucketEncryptionOutput, PutBucketLifecycleOutput, PutBucketPublicAccessBlockOutput,
-        PutBucketTaggingOutput, PutBucketVersioningOutput,
+        HeadBucketOutput, ListBucketsOutput,
     },
 };
 
@@ -90,7 +86,7 @@ impl BlockingBucketsService {
         BlockingPutBucketVersioningRequest {
             client: self.client.clone(),
             bucket: bucket.into(),
-            configuration: None,
+            body: None,
         }
     }
 
@@ -107,7 +103,7 @@ impl BlockingBucketsService {
         BlockingPutBucketLifecycleRequest {
             client: self.client.clone(),
             bucket: bucket.into(),
-            configuration: None,
+            body: None,
         }
     }
 
@@ -135,7 +131,7 @@ impl BlockingBucketsService {
         BlockingPutBucketCorsRequest {
             client: self.client.clone(),
             bucket: bucket.into(),
-            configuration: None,
+            body: None,
         }
     }
 
@@ -160,7 +156,7 @@ impl BlockingBucketsService {
         BlockingPutBucketTaggingRequest {
             client: self.client.clone(),
             bucket: bucket.into(),
-            tagging: None,
+            body: None,
         }
     }
 
@@ -185,7 +181,7 @@ impl BlockingBucketsService {
         BlockingPutBucketEncryptionRequest {
             client: self.client.clone(),
             bucket: bucket.into(),
-            configuration: None,
+            body: None,
         }
     }
 
@@ -311,11 +307,7 @@ impl BlockingListBucketsRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_list_buckets)
+        parse_xml_response(resp, crate::util::xml::parse_list_buckets)
     }
 }
 
@@ -337,10 +329,6 @@ impl BlockingHeadBucketRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
         Ok(HeadBucketOutput {
             region: crate::util::headers::header_string(resp.headers(), "x-amz-bucket-region"),
         })
@@ -358,13 +346,13 @@ impl BlockingCreateBucketRequest {
     /// Sets the location constraint for bucket creation.
     pub fn location_constraint(mut self, region: impl Into<String>) -> Result<Self> {
         let region = region.into();
-        crate::auth::Region::new(region.as_str())?;
+        crate::util::validation::validate_region("region", &region)?;
         self.location_constraint = Some(region);
         Ok(self)
     }
 
     /// Sends the request.
-    pub fn send(self) -> Result<CreateBucketOutput> {
+    pub fn send(self) -> Result<()> {
         let mut headers = HeaderMap::new();
         let location_constraint =
             create_bucket_location_constraint(self.location_constraint, self.client.region())?;
@@ -377,7 +365,7 @@ impl BlockingCreateBucketRequest {
             None => BlockingBody::Empty,
         };
 
-        let resp = self.client.execute(
+        self.client.execute(
             Method::PUT,
             Some(&self.bucket),
             None,
@@ -386,10 +374,7 @@ impl BlockingCreateBucketRequest {
             body,
         )?;
 
-        if resp.status() == StatusCode::OK || resp.status() == StatusCode::NO_CONTENT {
-            return Ok(CreateBucketOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -401,8 +386,8 @@ pub struct BlockingDeleteBucketRequest {
 
 impl BlockingDeleteBucketRequest {
     /// Sends the request.
-    pub fn send(self) -> Result<DeleteBucketOutput> {
-        let resp = self.client.execute(
+    pub fn send(self) -> Result<()> {
+        self.client.execute(
             Method::DELETE,
             Some(&self.bucket),
             None,
@@ -411,10 +396,7 @@ impl BlockingDeleteBucketRequest {
             BlockingBody::Empty,
         )?;
 
-        if resp.status() == StatusCode::NO_CONTENT || resp.status().is_success() {
-            return Ok(DeleteBucketOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -436,11 +418,7 @@ impl BlockingGetBucketVersioningRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_bucket_versioning)
+        parse_xml_response(resp, crate::util::xml::parse_bucket_versioning)
     }
 }
 
@@ -448,27 +426,22 @@ impl BlockingGetBucketVersioningRequest {
 pub struct BlockingPutBucketVersioningRequest {
     client: BlockingClient,
     bucket: String,
-    configuration: Option<BucketVersioningConfiguration>,
+    body: Option<Bytes>,
 }
 
 impl BlockingPutBucketVersioningRequest {
     /// Sets the versioning configuration to apply.
     pub fn configuration(mut self, value: BucketVersioningConfiguration) -> Result<Self> {
-        crate::util::xml::validate_bucket_versioning(&value)?;
-        self.configuration = Some(value);
+        self.body = Some(crate::util::xml::encode_bucket_versioning(&value)?);
         Ok(self)
     }
 
     /// Sends the request.
-    pub fn send(self) -> Result<PutBucketVersioningOutput> {
-        let configuration = require_configured(
-            self.configuration,
-            "put_versioning requires a configuration",
-        )?;
-        let body = crate::util::xml::encode_bucket_versioning(&configuration)?;
+    pub fn send(self) -> Result<()> {
+        let body = require_configured(self.body, "put_versioning requires a configuration")?;
         let headers = xml_body_headers(body.as_ref())?;
 
-        let resp = self.client.execute(
+        self.client.execute(
             Method::PUT,
             Some(&self.bucket),
             None,
@@ -477,10 +450,7 @@ impl BlockingPutBucketVersioningRequest {
             BlockingBody::Bytes(body),
         )?;
 
-        if resp.status().is_success() {
-            return Ok(PutBucketVersioningOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -502,11 +472,7 @@ impl BlockingGetBucketLifecycleRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_bucket_lifecycle)
+        parse_xml_response(resp, crate::util::xml::parse_bucket_lifecycle)
     }
 }
 
@@ -550,25 +516,22 @@ impl BlockingGetBucketLifecycleRequest {
 pub struct BlockingPutBucketLifecycleRequest {
     client: BlockingClient,
     bucket: String,
-    configuration: Option<BucketLifecycleConfiguration>,
+    body: Option<Bytes>,
 }
 
 impl BlockingPutBucketLifecycleRequest {
     /// Sets the lifecycle configuration to apply.
     pub fn configuration(mut self, value: BucketLifecycleConfiguration) -> Result<Self> {
-        crate::util::xml::validate_bucket_lifecycle(&value)?;
-        self.configuration = Some(value);
+        self.body = Some(crate::util::xml::encode_bucket_lifecycle(&value)?);
         Ok(self)
     }
 
     /// Sends the request.
-    pub fn send(self) -> Result<PutBucketLifecycleOutput> {
-        let configuration =
-            require_configured(self.configuration, "put_lifecycle requires a configuration")?;
-        let body = crate::util::xml::encode_bucket_lifecycle(&configuration)?;
+    pub fn send(self) -> Result<()> {
+        let body = require_configured(self.body, "put_lifecycle requires a configuration")?;
         let headers = xml_body_headers(body.as_ref())?;
 
-        let resp = self.client.execute(
+        self.client.execute(
             Method::PUT,
             Some(&self.bucket),
             None,
@@ -577,10 +540,7 @@ impl BlockingPutBucketLifecycleRequest {
             BlockingBody::Bytes(body),
         )?;
 
-        if resp.status().is_success() {
-            return Ok(PutBucketLifecycleOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -592,8 +552,8 @@ pub struct BlockingDeleteBucketLifecycleRequest {
 
 impl BlockingDeleteBucketLifecycleRequest {
     /// Sends the request.
-    pub fn send(self) -> Result<DeleteBucketLifecycleOutput> {
-        let resp = self.client.execute(
+    pub fn send(self) -> Result<()> {
+        self.client.execute(
             Method::DELETE,
             Some(&self.bucket),
             None,
@@ -602,10 +562,7 @@ impl BlockingDeleteBucketLifecycleRequest {
             BlockingBody::Empty,
         )?;
 
-        if resp.status() == StatusCode::NO_CONTENT || resp.status().is_success() {
-            return Ok(DeleteBucketLifecycleOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -627,11 +584,7 @@ impl BlockingGetBucketCorsRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_bucket_cors)
+        parse_xml_response(resp, crate::util::xml::parse_bucket_cors)
     }
 }
 
@@ -639,25 +592,22 @@ impl BlockingGetBucketCorsRequest {
 pub struct BlockingPutBucketCorsRequest {
     client: BlockingClient,
     bucket: String,
-    configuration: Option<BucketCorsConfiguration>,
+    body: Option<Bytes>,
 }
 
 impl BlockingPutBucketCorsRequest {
     /// Sets the CORS configuration to apply.
     pub fn configuration(mut self, value: BucketCorsConfiguration) -> Result<Self> {
-        crate::util::xml::validate_bucket_cors(&value)?;
-        self.configuration = Some(value);
+        self.body = Some(crate::util::xml::encode_bucket_cors(&value)?);
         Ok(self)
     }
 
     /// Sends the request.
-    pub fn send(self) -> Result<PutBucketCorsOutput> {
-        let configuration =
-            require_configured(self.configuration, "put_cors requires a configuration")?;
-        let body = crate::util::xml::encode_bucket_cors(&configuration)?;
+    pub fn send(self) -> Result<()> {
+        let body = require_configured(self.body, "put_cors requires a configuration")?;
         let headers = xml_body_headers(body.as_ref())?;
 
-        let resp = self.client.execute(
+        self.client.execute(
             Method::PUT,
             Some(&self.bucket),
             None,
@@ -666,10 +616,7 @@ impl BlockingPutBucketCorsRequest {
             BlockingBody::Bytes(body),
         )?;
 
-        if resp.status().is_success() {
-            return Ok(PutBucketCorsOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -681,8 +628,8 @@ pub struct BlockingDeleteBucketCorsRequest {
 
 impl BlockingDeleteBucketCorsRequest {
     /// Sends the request.
-    pub fn send(self) -> Result<DeleteBucketCorsOutput> {
-        let resp = self.client.execute(
+    pub fn send(self) -> Result<()> {
+        self.client.execute(
             Method::DELETE,
             Some(&self.bucket),
             None,
@@ -691,10 +638,7 @@ impl BlockingDeleteBucketCorsRequest {
             BlockingBody::Empty,
         )?;
 
-        if resp.status() == StatusCode::NO_CONTENT || resp.status().is_success() {
-            return Ok(DeleteBucketCorsOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -716,11 +660,7 @@ impl BlockingGetBucketTaggingRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_bucket_tagging)
+        parse_xml_response(resp, crate::util::xml::parse_bucket_tagging)
     }
 }
 
@@ -728,24 +668,22 @@ impl BlockingGetBucketTaggingRequest {
 pub struct BlockingPutBucketTaggingRequest {
     client: BlockingClient,
     bucket: String,
-    tagging: Option<BucketTagging>,
+    body: Option<Bytes>,
 }
 
 impl BlockingPutBucketTaggingRequest {
     /// Sets the tag set to apply.
     pub fn tagging(mut self, value: BucketTagging) -> Result<Self> {
-        crate::util::xml::validate_bucket_tagging(&value)?;
-        self.tagging = Some(value);
+        self.body = Some(crate::util::xml::encode_bucket_tagging(&value)?);
         Ok(self)
     }
 
     /// Sends the request.
-    pub fn send(self) -> Result<PutBucketTaggingOutput> {
-        let tagging = require_configured(self.tagging, "put_tagging requires a tag set")?;
-        let body = crate::util::xml::encode_bucket_tagging(&tagging)?;
+    pub fn send(self) -> Result<()> {
+        let body = require_configured(self.body, "put_tagging requires a tag set")?;
         let headers = xml_body_headers(body.as_ref())?;
 
-        let resp = self.client.execute(
+        self.client.execute(
             Method::PUT,
             Some(&self.bucket),
             None,
@@ -754,10 +692,7 @@ impl BlockingPutBucketTaggingRequest {
             BlockingBody::Bytes(body),
         )?;
 
-        if resp.status().is_success() {
-            return Ok(PutBucketTaggingOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -769,8 +704,8 @@ pub struct BlockingDeleteBucketTaggingRequest {
 
 impl BlockingDeleteBucketTaggingRequest {
     /// Sends the request.
-    pub fn send(self) -> Result<DeleteBucketTaggingOutput> {
-        let resp = self.client.execute(
+    pub fn send(self) -> Result<()> {
+        self.client.execute(
             Method::DELETE,
             Some(&self.bucket),
             None,
@@ -779,10 +714,7 @@ impl BlockingDeleteBucketTaggingRequest {
             BlockingBody::Empty,
         )?;
 
-        if resp.status() == StatusCode::NO_CONTENT || resp.status().is_success() {
-            return Ok(DeleteBucketTaggingOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -804,11 +736,7 @@ impl BlockingGetBucketEncryptionRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_bucket_encryption)
+        parse_xml_response(resp, crate::util::xml::parse_bucket_encryption)
     }
 }
 
@@ -816,27 +744,22 @@ impl BlockingGetBucketEncryptionRequest {
 pub struct BlockingPutBucketEncryptionRequest {
     client: BlockingClient,
     bucket: String,
-    configuration: Option<BucketEncryptionConfiguration>,
+    body: Option<Bytes>,
 }
 
 impl BlockingPutBucketEncryptionRequest {
     /// Sets the encryption configuration to apply.
     pub fn configuration(mut self, value: BucketEncryptionConfiguration) -> Result<Self> {
-        crate::util::xml::validate_bucket_encryption(&value)?;
-        self.configuration = Some(value);
+        self.body = Some(crate::util::xml::encode_bucket_encryption(&value)?);
         Ok(self)
     }
 
     /// Sends the request.
-    pub fn send(self) -> Result<PutBucketEncryptionOutput> {
-        let configuration = require_configured(
-            self.configuration,
-            "put_encryption requires a configuration",
-        )?;
-        let body = crate::util::xml::encode_bucket_encryption(&configuration)?;
+    pub fn send(self) -> Result<()> {
+        let body = require_configured(self.body, "put_encryption requires a configuration")?;
         let headers = xml_body_headers(body.as_ref())?;
 
-        let resp = self.client.execute(
+        self.client.execute(
             Method::PUT,
             Some(&self.bucket),
             None,
@@ -845,10 +768,7 @@ impl BlockingPutBucketEncryptionRequest {
             BlockingBody::Bytes(body),
         )?;
 
-        if resp.status().is_success() {
-            return Ok(PutBucketEncryptionOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -860,8 +780,8 @@ pub struct BlockingDeleteBucketEncryptionRequest {
 
 impl BlockingDeleteBucketEncryptionRequest {
     /// Sends the request.
-    pub fn send(self) -> Result<DeleteBucketEncryptionOutput> {
-        let resp = self.client.execute(
+    pub fn send(self) -> Result<()> {
+        self.client.execute(
             Method::DELETE,
             Some(&self.bucket),
             None,
@@ -870,10 +790,7 @@ impl BlockingDeleteBucketEncryptionRequest {
             BlockingBody::Empty,
         )?;
 
-        if resp.status() == StatusCode::NO_CONTENT || resp.status().is_success() {
-            return Ok(DeleteBucketEncryptionOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -895,11 +812,7 @@ impl BlockingGetBucketPublicAccessBlockRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        parse_blocking_xml_response(resp, crate::util::xml::parse_bucket_public_access_block)
+        parse_xml_response(resp, crate::util::xml::parse_bucket_public_access_block)
     }
 }
 
@@ -918,7 +831,7 @@ impl BlockingPutBucketPublicAccessBlockRequest {
     }
 
     /// Sends the request.
-    pub fn send(self) -> Result<PutBucketPublicAccessBlockOutput> {
+    pub fn send(self) -> Result<()> {
         let configuration = require_configured(
             self.configuration,
             "put_public_access_block requires a configuration",
@@ -926,7 +839,7 @@ impl BlockingPutBucketPublicAccessBlockRequest {
         let body = crate::util::xml::encode_bucket_public_access_block(&configuration)?;
         let headers = xml_body_headers(body.as_ref())?;
 
-        let resp = self.client.execute(
+        self.client.execute(
             Method::PUT,
             Some(&self.bucket),
             None,
@@ -935,10 +848,7 @@ impl BlockingPutBucketPublicAccessBlockRequest {
             BlockingBody::Bytes(body),
         )?;
 
-        if resp.status().is_success() {
-            return Ok(PutBucketPublicAccessBlockOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -950,8 +860,8 @@ pub struct BlockingDeleteBucketPublicAccessBlockRequest {
 
 impl BlockingDeleteBucketPublicAccessBlockRequest {
     /// Sends the request.
-    pub fn send(self) -> Result<DeleteBucketPublicAccessBlockOutput> {
-        let resp = self.client.execute(
+    pub fn send(self) -> Result<()> {
+        self.client.execute(
             Method::DELETE,
             Some(&self.bucket),
             None,
@@ -960,10 +870,7 @@ impl BlockingDeleteBucketPublicAccessBlockRequest {
             BlockingBody::Empty,
         )?;
 
-        if resp.status() == StatusCode::NO_CONTENT || resp.status().is_success() {
-            return Ok(DeleteBucketPublicAccessBlockOutput);
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -988,12 +895,7 @@ impl BlockingGetBucketConfigRawRequest {
             BlockingBody::Empty,
         )?;
 
-        if !resp.status().is_success() {
-            return Err(read_response_error(resp)?);
-        }
-
-        let (_, body) = resp.into_parts();
-        read_body_string(body)
+        crate::util::text::decode_utf8_response_body(resp.body()).map(str::to_owned)
     }
 }
 
@@ -1041,7 +943,7 @@ impl BlockingPutBucketConfigRawRequest {
 
         let headers = xml_body_headers(self.body.as_ref())?;
 
-        let resp = self.client.execute(
+        self.client.execute(
             Method::PUT,
             Some(&self.bucket),
             None,
@@ -1050,10 +952,7 @@ impl BlockingPutBucketConfigRawRequest {
             BlockingBody::Bytes(self.body),
         )?;
 
-        if resp.status().is_success() {
-            return Ok(());
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 
@@ -1069,7 +968,7 @@ impl BlockingDeleteBucketConfigRawRequest {
     pub fn send(self) -> Result<()> {
         validate_subresource(&self.subresource)?;
 
-        let resp = self.client.execute(
+        self.client.execute(
             Method::DELETE,
             Some(&self.bucket),
             None,
@@ -1078,10 +977,7 @@ impl BlockingDeleteBucketConfigRawRequest {
             BlockingBody::Empty,
         )?;
 
-        if resp.status() == StatusCode::NO_CONTENT || resp.status().is_success() {
-            return Ok(());
-        }
-        Err(read_response_error(resp)?)
+        Ok(())
     }
 }
 

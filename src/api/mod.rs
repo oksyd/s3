@@ -26,8 +26,6 @@
 #[cfg(feature = "blocking")]
 mod blocking_buckets;
 #[cfg(feature = "blocking")]
-mod blocking_common;
-#[cfg(feature = "blocking")]
 mod blocking_objects;
 #[cfg(feature = "async")]
 mod buckets;
@@ -51,8 +49,7 @@ pub use buckets::{
 pub use objects::{
     CopyObjectRequest, DeleteObjectRequest, DeleteObjectsRequest, GetObjectRequest,
     HeadObjectRequest, ListObjectsV2Pager, ListObjectsV2Request, ObjectsService,
-    PresignDeleteObjectRequest, PresignGetObjectRequest, PresignHeadObjectRequest,
-    PresignObjectRequest, PresignPutObjectRequest, PutObjectRequest,
+    PresignObjectRequest, PutObjectRequest,
 };
 
 #[cfg(all(feature = "async", feature = "multipart"))]
@@ -81,9 +78,8 @@ pub use blocking_buckets::{
 pub use blocking_objects::{
     BlockingCopyObjectRequest, BlockingDeleteObjectRequest, BlockingDeleteObjectsRequest,
     BlockingGetObjectRequest, BlockingHeadObjectRequest, BlockingListObjectsV2Pager,
-    BlockingListObjectsV2Request, BlockingObjectsService, BlockingPresignDeleteObjectRequest,
-    BlockingPresignGetObjectRequest, BlockingPresignHeadObjectRequest,
-    BlockingPresignObjectRequest, BlockingPresignPutObjectRequest, BlockingPutObjectRequest,
+    BlockingListObjectsV2Request, BlockingObjectsService, BlockingPresignObjectRequest,
+    BlockingPutObjectRequest,
 };
 
 #[cfg(all(feature = "blocking", feature = "multipart"))]

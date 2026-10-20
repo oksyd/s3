@@ -1,5 +1,4 @@
 #![cfg(feature = "async")]
-#![allow(clippy::result_large_err)]
 
 use bytes::Bytes;
 use http::HeaderValue;
@@ -19,7 +18,7 @@ use s3::{
 mod common;
 
 fn is_not_found(err: &Error) -> bool {
-    matches!(err, Error::Api { status, .. } if *status == StatusCode::NOT_FOUND)
+    err.status() == Some(StatusCode::NOT_FOUND)
 }
 
 fn is_optional_unsupported(err: &Error) -> bool {
@@ -72,7 +71,7 @@ async fn s3_compat_async_put_get_list_delete_roundtrip() -> Result<(), Error> {
                 .send()
                 .await?;
 
-            let mut out = futures_util::io::Cursor::new(Vec::new());
+            let mut out = Vec::new();
             let written = client
                 .objects()
                 .get(&bucket, stream_key)
@@ -81,7 +80,7 @@ async fn s3_compat_async_put_get_list_delete_roundtrip() -> Result<(), Error> {
                 .write_to(&mut out)
                 .await?;
             assert_eq!(written, 5);
-            assert_eq!(out.into_inner(), b"hello".to_vec());
+            assert_eq!(out, b"hello");
 
             let presigned = client.objects().presign_get(&bucket, key).build()?;
             let resp = reqwest::Client::new()
@@ -98,7 +97,7 @@ async fn s3_compat_async_put_get_list_delete_roundtrip() -> Result<(), Error> {
 
             match client.objects().get(&bucket, "does-not-exist").send().await {
                 Ok(_) => panic!("expected not found error"),
-                Err(Error::Api { status, .. }) => assert_eq!(status, StatusCode::NOT_FOUND),
+                Err(Error::Api(error)) => assert_eq!(error.status, StatusCode::NOT_FOUND),
                 Err(other) => panic!("expected api error, got {other:?}"),
             }
 
@@ -482,10 +481,12 @@ async fn s3_compat_async_get_range_and_conditions() -> Result<(), Error> {
                     let got = out.bytes().await?;
                     assert_eq!(got, body);
                 }
-                Err(Error::Api { status, .. }) if strict => {
+                Err(Error::Api(error)) if strict => {
+                    let status = error.status;
                     assert_eq!(status, StatusCode::PRECONDITION_FAILED)
                 }
-                Err(Error::Api { status, .. }) => {
+                Err(Error::Api(error)) => {
+                    let status = error.status;
                     assert!(matches!(
                         status,
                         StatusCode::PRECONDITION_FAILED | StatusCode::BAD_REQUEST
@@ -508,10 +509,12 @@ async fn s3_compat_async_get_range_and_conditions() -> Result<(), Error> {
                     let got = out.bytes().await?;
                     assert_eq!(got, body);
                 }
-                Err(Error::Api { status, .. }) if strict => {
+                Err(Error::Api(error)) if strict => {
+                    let status = error.status;
                     assert_eq!(status, StatusCode::NOT_MODIFIED)
                 }
-                Err(Error::Api { status, .. }) => {
+                Err(Error::Api(error)) => {
+                    let status = error.status;
                     assert!(matches!(
                         status,
                         StatusCode::NOT_MODIFIED
@@ -700,7 +703,7 @@ async fn s3_compat_async_presign_put_head_delete_roundtrip() -> Result<(), Error
 
             match client.objects().head(&bucket, key).send().await {
                 Ok(_) => panic!("expected not found after delete"),
-                Err(Error::Api { status, .. }) => assert_eq!(status, StatusCode::NOT_FOUND),
+                Err(Error::Api(error)) => assert_eq!(error.status, StatusCode::NOT_FOUND),
                 Err(other) => panic!("expected api error, got {other:?}"),
             }
 
@@ -881,8 +884,8 @@ async fn s3_compat_async_multipart_put_get_roundtrip() -> Result<(), Error> {
             client
                 .objects()
                 .complete_multipart_upload(&bucket, key, &upload_id)
-                .part(1, etag1)?
                 .part(2, etag2)?
+                .part(1, etag1)?
                 .send()
                 .await?;
 
@@ -1020,7 +1023,8 @@ async fn s3_compat_async_multipart_abort_roundtrip() -> Result<(), Error> {
                 .await
             {
                 Ok(_) => panic!("expected error after abort"),
-                Err(Error::Api { status, .. }) => {
+                Err(Error::Api(error)) => {
+                    let status = error.status;
                     assert!(matches!(
                         status,
                         StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST

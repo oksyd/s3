@@ -40,41 +40,20 @@ impl CredentialsSnapshot {
 }
 
 /// Region identifier used for signing.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Region(String);
 
 impl Region {
     /// Creates a region from a non-empty lowercase DNS-compatible string.
     pub fn new(value: impl Into<String>) -> Result<Self> {
         let value = value.into();
-        if value.is_empty() {
-            return Err(Error::invalid_config("region must not be empty"));
-        }
-        if value.trim() != value {
-            return Err(Error::invalid_config(
-                "region must not include leading or trailing whitespace",
-            ));
-        }
-        if !value
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        {
-            return Err(Error::invalid_config(
-                "region must contain only lowercase ASCII letters, digits, or '-'",
-            ));
-        }
+        crate::util::validation::validate_region("region", &value)?;
         Ok(Self(value))
     }
 
     /// Returns the region string.
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl fmt::Debug for Region {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Region").field(&self.0).finish()
     }
 }
 

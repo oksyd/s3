@@ -1,6 +1,12 @@
-use http::{HeaderMap, header::AsHeaderName};
+use http::{
+    HeaderMap,
+    header::{AsHeaderName, HeaderName},
+};
 
-use crate::{Error, Result};
+use crate::{
+    Error, Result,
+    util::validation::{validate_object_key, validate_version_id},
+};
 
 pub(crate) fn header_string<N>(headers: &HeaderMap, name: N) -> Option<String>
 where
@@ -22,13 +28,31 @@ where
         .and_then(|v| v.parse::<u64>().ok())
 }
 
+pub(crate) fn metadata_header_name(value: &str) -> Result<HeaderName> {
+    if value.is_empty() {
+        return Err(Error::invalid_config("metadata key must not be empty"));
+    }
+    if value.trim() != value {
+        return Err(Error::invalid_config(
+            "metadata key must not include leading or trailing whitespace",
+        ));
+    }
+
+    let mut name = String::with_capacity("x-amz-meta-".len() + value.len());
+    name.push_str("x-amz-meta-");
+    name.push_str(value);
+
+    HeaderName::from_bytes(name.as_bytes())
+        .map_err(|_| Error::invalid_config("invalid metadata key for x-amz-meta-* header"))
+}
+
 pub(crate) fn copy_source_header_value(
     bucket: &str,
     key: &str,
     version_id: Option<&str>,
 ) -> Result<String> {
     validate_copy_source_bucket(bucket)?;
-    validate_copy_source_key(key)?;
+    validate_object_key(key)?;
     let bucket_enc = crate::util::encode::aws_percent_encode(bucket);
     let key_enc = crate::util::encode::aws_percent_encode_path(key);
 
@@ -42,10 +66,6 @@ pub(crate) fn copy_source_header_value(
     };
 
     Ok(value)
-}
-
-fn validate_copy_source_key(key: &str) -> Result<()> {
-    crate::util::url::validate_object_key(key)
 }
 
 fn validate_copy_source_bucket(bucket: &str) -> Result<()> {
@@ -75,13 +95,19 @@ fn validate_copy_source_bucket(bucket: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_version_id(version_id: &str) -> Result<()> {
-    crate::util::validation::validate_version_id(version_id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_metadata_header_name() {
+        let name = metadata_header_name("Foo").unwrap();
+        assert_eq!(name.as_str(), "x-amz-meta-foo");
+
+        assert!(metadata_header_name("").is_err());
+        assert!(metadata_header_name(" Foo ").is_err());
+        assert!(metadata_header_name("a b").is_err());
+    }
 
     #[test]
     fn extracts_string_and_u64_headers() {

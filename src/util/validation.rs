@@ -1,5 +1,25 @@
 use crate::{Error, Result};
 
+pub(crate) fn validate_region(name: &'static str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(Error::invalid_config(format!("{name} must not be empty")));
+    }
+    if value.trim() != value {
+        return Err(Error::invalid_config(format!(
+            "{name} must not include leading or trailing whitespace"
+        )));
+    }
+    if !value
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(Error::invalid_config(format!(
+            "{name} must contain only lowercase ASCII letters, digits, or '-'"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_object_key(key: &str) -> Result<()> {
     if key.is_empty() {
         return Err(Error::invalid_config("object key must not be empty"));

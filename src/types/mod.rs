@@ -32,10 +32,6 @@ pub(crate) const MAX_DELETE_OBJECTS_PER_REQUEST: usize = 1_000;
 
 #[cfg(any(test, feature = "async", feature = "blocking"))]
 pub(crate) mod xml;
-#[cfg(feature = "async")]
-/// Streaming response body for async operations.
-pub type ByteStream =
-    std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<Bytes>> + Send + 'static>>;
 
 /// Fully resolved presigned request.
 #[derive(Clone, Debug)]
@@ -51,62 +47,39 @@ pub struct PresignedRequest {
 #[cfg(feature = "async")]
 /// Output from a GET object request.
 pub struct GetObjectOutput {
-    /// Response body stream.
-    pub body: ByteStream,
+    /// Response body reader for Tokio I/O.
+    pub body: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send + 'static>>,
     /// Entity tag, if provided.
     pub etag: Option<String>,
     /// Content length, if known.
     pub content_length: Option<u64>,
     /// Content type, if provided.
     pub content_type: Option<String>,
-}
-
-#[cfg(feature = "blocking")]
-/// Blocking response body reader.
-pub struct BlockingByteStream {
-    inner: Box<dyn std::io::Read + 'static>,
-}
-
-#[cfg(feature = "blocking")]
-impl BlockingByteStream {
-    pub(crate) fn new<R>(reader: R) -> Self
-    where
-        R: std::io::Read + 'static,
-    {
-        Self {
-            inner: Box::new(reader),
-        }
-    }
-}
-
-#[cfg(feature = "blocking")]
-impl std::fmt::Debug for BlockingByteStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlockingByteStream")
-            .field("inner", &"<reader>")
-            .finish()
-    }
-}
-
-#[cfg(feature = "blocking")]
-impl std::io::Read for BlockingByteStream {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.inner.read(buf)
-    }
 }
 
 #[cfg(feature = "blocking")]
 /// Output from a blocking GET object request.
-#[derive(Debug)]
 pub struct BlockingGetObjectOutput {
     /// Response body reader.
-    pub body: BlockingByteStream,
+    pub body: Box<dyn std::io::Read + 'static>,
     /// Entity tag, if provided.
     pub etag: Option<String>,
     /// Content length, if known.
     pub content_length: Option<u64>,
     /// Content type, if provided.
     pub content_type: Option<String>,
+}
+
+#[cfg(feature = "blocking")]
+impl std::fmt::Debug for BlockingGetObjectOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockingGetObjectOutput")
+            .field("body", &"<reader>")
+            .field("etag", &self.etag)
+            .field("content_length", &self.content_length)
+            .field("content_type", &self.content_type)
+            .finish()
+    }
 }
 
 #[cfg(feature = "blocking")]
@@ -122,14 +95,13 @@ impl BlockingGetObjectOutput {
         Ok(Bytes::from(out))
     }
 
-    /// Streams the response body into the provided writer.
+    /// Copies the response body into a writer without flushing it.
     pub fn write_to<W>(mut self, writer: &mut W) -> Result<u64>
     where
-        W: std::io::Write,
+        W: std::io::Write + ?Sized,
     {
-        let bytes_copied = std::io::copy(&mut self.body, writer)
-            .map_err(|e| Error::transport("failed to write response body", Some(Box::new(e))))?;
-        Ok(bytes_copied)
+        std::io::copy(&mut self.body, writer)
+            .map_err(|e| Error::transport("failed to write response body", Some(Box::new(e))))
     }
 }
 
@@ -137,7 +109,7 @@ impl BlockingGetObjectOutput {
 impl std::fmt::Debug for GetObjectOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GetObjectOutput")
-            .field("body", &"<stream>")
+            .field("body", &"<reader>")
             .field("etag", &self.etag)
             .field("content_length", &self.content_length)
             .field("content_type", &self.content_type)
@@ -147,43 +119,27 @@ impl std::fmt::Debug for GetObjectOutput {
 
 #[cfg(feature = "async")]
 impl GetObjectOutput {
-    /// Collects the response body into memory.
-    pub async fn bytes(self) -> Result<Bytes> {
-        use futures_util::StreamExt as _;
+    /// Reads the full response body into memory.
+    pub async fn bytes(mut self) -> Result<Bytes> {
+        use tokio::io::AsyncReadExt as _;
 
         let mut out = Vec::new();
-        let mut stream = self.body;
-        while let Some(chunk) = stream.next().await {
-            out.extend_from_slice(&chunk?);
-        }
+        self.body.read_to_end(&mut out).await.map_err(|error| {
+            Error::transport("failed to read response body", Some(Box::new(error)))
+        })?;
         Ok(Bytes::from(out))
     }
 
-    /// Streams the response body into the provided writer.
-    pub async fn write_to<W>(self, writer: &mut W) -> Result<u64>
+    /// Copies the response body into a Tokio writer without flushing it.
+    pub async fn write_to<W>(mut self, writer: &mut W) -> Result<u64>
     where
-        W: futures_io::AsyncWrite + Unpin,
+        W: tokio::io::AsyncWrite + Unpin + ?Sized,
     {
-        use futures_util::{StreamExt as _, io::AsyncWriteExt as _};
-
-        let mut written = 0u64;
-        let mut stream = self.body;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            writer.write_all(&chunk).await.map_err(|e| {
-                Error::transport("failed to write response body", Some(Box::new(e)))
-            })?;
-            written = written
-                .checked_add(chunk.len() as u64)
-                .ok_or_else(|| Error::transport("response body length overflow", None))?;
-        }
-
-        writer
-            .flush()
+        tokio::io::copy(&mut self.body, writer)
             .await
-            .map_err(|e| Error::transport("failed to flush writer", Some(Box::new(e))))?;
-
-        Ok(written)
+            .map_err(|error| {
+                Error::transport("failed to write response body", Some(Box::new(error)))
+            })
     }
 }
 
@@ -383,10 +339,6 @@ fn validate_completed_part_etag(etag: &str) -> Result<()> {
     Ok(())
 }
 
-/// Output from a DELETE object request.
-#[derive(Debug)]
-pub struct DeleteObjectOutput;
-
 /// Output from a multi-delete request.
 #[derive(Debug)]
 pub struct DeleteObjectsOutput {
@@ -532,11 +484,6 @@ pub struct CompleteMultipartUploadOutput {
 }
 
 #[cfg(feature = "multipart")]
-/// Output from aborting a multipart upload.
-#[derive(Debug)]
-pub struct AbortMultipartUploadOutput;
-
-#[cfg(feature = "multipart")]
 /// Output from listing multipart parts.
 #[derive(Debug)]
 pub struct ListPartsOutput {
@@ -656,14 +603,6 @@ pub struct HeadBucketOutput {
     pub region: Option<String>,
 }
 
-/// Output from a create bucket request.
-#[derive(Debug)]
-pub struct CreateBucketOutput;
-
-/// Output from a delete bucket request.
-#[derive(Debug)]
-pub struct DeleteBucketOutput;
-
 /// Bucket versioning configuration.
 #[derive(Clone, Debug, Default)]
 pub struct BucketVersioningConfiguration {
@@ -690,10 +629,6 @@ pub enum BucketMfaDeleteStatus {
     /// Disable MFA delete.
     Disabled,
 }
-
-/// Output from updating bucket versioning.
-#[derive(Debug)]
-pub struct PutBucketVersioningOutput;
 
 /// Bucket lifecycle configuration.
 #[derive(Clone, Debug, Default)]
@@ -726,14 +661,6 @@ pub enum BucketLifecycleStatus {
     /// Disable the rule.
     Disabled,
 }
-
-/// Output from updating bucket lifecycle configuration.
-#[derive(Debug)]
-pub struct PutBucketLifecycleOutput;
-
-/// Output from deleting bucket lifecycle configuration.
-#[derive(Debug)]
-pub struct DeleteBucketLifecycleOutput;
 
 /// Bucket CORS configuration.
 #[derive(Clone, Debug, Default)]
@@ -790,14 +717,6 @@ impl CorsMethod {
     }
 }
 
-/// Output from updating bucket CORS configuration.
-#[derive(Debug)]
-pub struct PutBucketCorsOutput;
-
-/// Output from deleting bucket CORS configuration.
-#[derive(Debug)]
-pub struct DeleteBucketCorsOutput;
-
 /// Bucket tag set.
 #[derive(Clone, Debug, Default)]
 pub struct BucketTagging {
@@ -813,14 +732,6 @@ pub struct Tag {
     /// Tag value.
     pub value: String,
 }
-
-/// Output from updating bucket tags.
-#[derive(Debug)]
-pub struct PutBucketTaggingOutput;
-
-/// Output from deleting bucket tags.
-#[derive(Debug)]
-pub struct DeleteBucketTaggingOutput;
 
 /// Bucket encryption configuration.
 #[derive(Clone, Debug, Default)]
@@ -872,14 +783,6 @@ impl SseAlgorithm {
     }
 }
 
-/// Output from updating bucket encryption configuration.
-#[derive(Debug)]
-pub struct PutBucketEncryptionOutput;
-
-/// Output from deleting bucket encryption configuration.
-#[derive(Debug)]
-pub struct DeleteBucketEncryptionOutput;
-
 /// Bucket public access block configuration.
 #[derive(Clone, Debug, Default)]
 pub struct BucketPublicAccessBlockConfiguration {
@@ -892,14 +795,6 @@ pub struct BucketPublicAccessBlockConfiguration {
     /// Restrict public buckets.
     pub restrict_public_buckets: bool,
 }
-
-/// Output from updating public access block settings.
-#[derive(Debug)]
-pub struct PutBucketPublicAccessBlockOutput;
-
-/// Output from deleting public access block settings.
-#[derive(Debug)]
-pub struct DeleteBucketPublicAccessBlockOutput;
 
 #[cfg(all(test, feature = "checksums"))]
 mod checksum_tests {
