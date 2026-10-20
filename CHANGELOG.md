@@ -1,8 +1,21 @@
+## [0.1.38] - 2026-10-20
+
+### 🚜 Refactor
+
+- Simplify S3 APIs
+
+### ⚙️ Miscellaneous Tasks
+
+- *(ci)* Update
 ## [0.1.37] - 2026-09-24
 
 ### 🐛 Bug Fixes
 
 - Make ListObjectsV2 pager max_keys getters callable
+
+### ⚙️ Miscellaneous Tasks
+
+- Release s3 version 0.1.37
 ## [0.1.36] - 2026-06-08
 
 ### 🐛 Bug Fixes
