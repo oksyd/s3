@@ -17,8 +17,8 @@ use super::common::{
 };
 #[cfg(feature = "multipart")]
 use super::common::{
-    push_completed_part, validate_max_parts, validate_part_number_marker, validate_upload_id,
-    validate_upload_part_number,
+    push_completed_part, validate_max_parts, validate_max_uploads, validate_part_number_marker,
+    validate_upload_id, validate_upload_part_number,
 };
 
 use crate::{
@@ -33,8 +33,8 @@ use crate::{
 
 #[cfg(feature = "multipart")]
 use crate::types::{
-    CompleteMultipartUploadOutput, CompletedPart, CreateMultipartUploadOutput, ListPartsOutput,
-    UploadPartCopyOutput, UploadPartOutput,
+    CompleteMultipartUploadOutput, CompletedPart, CreateMultipartUploadOutput,
+    ListMultipartUploadsOutput, ListPartsOutput, UploadPartCopyOutput, UploadPartOutput,
 };
 
 /// Object operations service (blocking).
@@ -257,6 +257,22 @@ impl BlockingObjectsService {
             upload_id: upload_id.into(),
             max_parts: None,
             part_number_marker: None,
+        }
+    }
+
+    #[cfg(feature = "multipart")]
+    /// Starts a request to list in-progress multipart uploads.
+    pub fn list_multipart_uploads(
+        &self,
+        bucket: impl Into<String>,
+    ) -> BlockingListMultipartUploadsRequest {
+        BlockingListMultipartUploadsRequest {
+            client: self.client.clone(),
+            bucket: bucket.into(),
+            prefix: None,
+            key_marker: None,
+            upload_id_marker: None,
+            max_uploads: None,
         }
     }
 
@@ -1198,6 +1214,79 @@ impl BlockingListPartsRequest {
     }
 }
 
+#[cfg(feature = "multipart")]
+/// Request builder for listing in-progress multipart uploads.
+pub struct BlockingListMultipartUploadsRequest {
+    client: BlockingClient,
+    bucket: String,
+    prefix: Option<String>,
+    key_marker: Option<String>,
+    upload_id_marker: Option<String>,
+    max_uploads: Option<u32>,
+}
+
+#[cfg(feature = "multipart")]
+impl BlockingListMultipartUploadsRequest {
+    /// Filters by key prefix.
+    pub fn prefix(mut self, value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_query_value("prefix", &value)?;
+        self.prefix = Some(value);
+        Ok(self)
+    }
+
+    /// Sets the key marker for pagination.
+    pub fn key_marker(mut self, value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_query_value("key_marker", &value)?;
+        self.key_marker = Some(value);
+        Ok(self)
+    }
+
+    /// Sets the upload id marker for pagination.
+    pub fn upload_id_marker(mut self, value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_query_token("upload_id_marker", &value)?;
+        self.upload_id_marker = Some(value);
+        Ok(self)
+    }
+
+    /// Sets the maximum number of uploads to return.
+    pub fn max_uploads(mut self, value: u32) -> Result<Self> {
+        validate_max_uploads(value)?;
+        self.max_uploads = Some(value);
+        Ok(self)
+    }
+
+    /// Sends the request.
+    pub fn send(self) -> Result<ListMultipartUploadsOutput> {
+        let mut query = vec![("uploads".to_string(), String::new())];
+        if let Some(v) = self.prefix {
+            query.push(("prefix".to_string(), v));
+        }
+        if let Some(v) = self.key_marker {
+            query.push(("key-marker".to_string(), v));
+        }
+        if let Some(v) = self.upload_id_marker {
+            query.push(("upload-id-marker".to_string(), v));
+        }
+        if let Some(v) = self.max_uploads {
+            query.push(("max-uploads".to_string(), v.to_string()));
+        }
+
+        let resp = self.client.execute(
+            Method::GET,
+            Some(&self.bucket),
+            None,
+            query,
+            HeaderMap::new(),
+            BlockingBody::Empty,
+        )?;
+
+        parse_xml_response(resp, crate::util::xml::parse_list_multipart_uploads)
+    }
+}
+
 /// Request builder for ListObjectsV2.
 ///
 /// Created by [`BlockingObjectsService::list_v2`](crate::api::BlockingObjectsService::list_v2).
@@ -1713,6 +1802,27 @@ mod tests {
                 .list_parts("bucket", "key", "upload-id")
                 .part_number_marker(0),
             "part_number_marker",
+        );
+    }
+
+    #[cfg(feature = "multipart")]
+    #[test]
+    fn list_multipart_uploads_setters_reject_invalid_values() {
+        let objects = test_client().objects();
+
+        assert_invalid_config(
+            objects.list_multipart_uploads("bucket").max_uploads(0),
+            "max_uploads",
+        );
+        assert_invalid_config(
+            objects
+                .list_multipart_uploads("bucket")
+                .upload_id_marker(""),
+            "upload_id_marker",
+        );
+        assert_invalid_config(
+            objects.list_multipart_uploads("bucket").prefix(""),
+            "prefix",
         );
     }
 

@@ -55,7 +55,7 @@ pub use objects::{
 #[cfg(all(feature = "async", feature = "multipart"))]
 pub use objects::{
     AbortMultipartUploadRequest, CompleteMultipartUploadRequest, CreateMultipartUploadRequest,
-    ListPartsRequest, UploadPartCopyRequest, UploadPartRequest,
+    ListMultipartUploadsRequest, ListPartsRequest, UploadPartCopyRequest, UploadPartRequest,
 };
 
 #[cfg(feature = "blocking")]
@@ -85,6 +85,6 @@ pub use blocking_objects::{
 #[cfg(all(feature = "blocking", feature = "multipart"))]
 pub use blocking_objects::{
     BlockingAbortMultipartUploadRequest, BlockingCompleteMultipartUploadRequest,
-    BlockingCreateMultipartUploadRequest, BlockingListPartsRequest, BlockingUploadPartCopyRequest,
-    BlockingUploadPartRequest,
+    BlockingCreateMultipartUploadRequest, BlockingListMultipartUploadsRequest,
+    BlockingListPartsRequest, BlockingUploadPartCopyRequest, BlockingUploadPartRequest,
 };

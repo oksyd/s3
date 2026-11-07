@@ -266,6 +266,17 @@ pub(crate) fn parse_list_parts(body: &str) -> Result<types::ListPartsOutput, Err
 }
 
 #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+pub(crate) fn parse_list_multipart_uploads(
+    body: &str,
+) -> Result<types::ListMultipartUploadsOutput, Error> {
+    let parsed = parse_response_xml::<xml::XmlListMultipartUploadsResult>(
+        body,
+        "ListMultipartUploadsResult",
+    )?;
+    Ok(types::ListMultipartUploadsOutput::from(parsed))
+}
+
+#[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
 pub(crate) fn parse_upload_part_copy(body: &str) -> Result<types::UploadPartCopyOutput, Error> {
     let parsed = parse_response_xml::<xml::XmlCopyPartResult>(body, "CopyPartResult")?;
     Ok(types::UploadPartCopyOutput::from(parsed))
@@ -1143,6 +1154,48 @@ mod tests {
         );
         #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
         assert!(parse_list_parts("<ListPartsResult/>").is_err());
+        #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+        assert!(parse_list_multipart_uploads("<ListMultipartUploadsResult/>").is_err());
+    }
+
+    #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+    #[test]
+    fn parses_list_multipart_uploads() {
+        let xml = r#"
+<ListMultipartUploadsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket-a</Bucket>
+  <KeyMarker></KeyMarker>
+  <UploadIdMarker></UploadIdMarker>
+  <NextKeyMarker>uploads/b</NextKeyMarker>
+  <NextUploadIdMarker>upload-2</NextUploadIdMarker>
+  <Prefix>uploads/</Prefix>
+  <MaxUploads>2</MaxUploads>
+  <IsTruncated>true</IsTruncated>
+  <Upload>
+    <Key>uploads/a</Key>
+    <UploadId>upload-1</UploadId>
+    <Initiated>2020-01-01T00:00:00.000Z</Initiated>
+  </Upload>
+  <Upload>
+    <Key>uploads/b</Key>
+    <UploadId>upload-2</UploadId>
+  </Upload>
+</ListMultipartUploadsResult>
+"#;
+
+        let out = parse_list_multipart_uploads(xml).unwrap();
+        assert!(out.is_truncated);
+        assert_eq!(out.prefix.as_deref(), Some("uploads/"));
+        assert_eq!(out.next_key_marker.as_deref(), Some("uploads/b"));
+        assert_eq!(out.next_upload_id_marker.as_deref(), Some("upload-2"));
+        assert_eq!(out.uploads.len(), 2);
+        assert_eq!(out.uploads[0].key, "uploads/a");
+        assert_eq!(out.uploads[0].upload_id, "upload-1");
+        assert_eq!(
+            out.uploads[0].initiated.as_deref(),
+            Some("2020-01-01T00:00:00.000Z")
+        );
+        assert!(out.uploads[1].initiated.is_none());
     }
 
     #[test]

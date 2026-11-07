@@ -506,6 +506,42 @@ pub struct ListPartsOutput {
 }
 
 #[cfg(feature = "multipart")]
+/// Output from listing in-progress multipart uploads.
+#[derive(Debug)]
+pub struct ListMultipartUploadsOutput {
+    /// Bucket name, if provided.
+    pub bucket: Option<String>,
+    /// Prefix filter, if any.
+    pub prefix: Option<String>,
+    /// Key marker for the current page.
+    pub key_marker: Option<String>,
+    /// Upload id marker for the current page.
+    pub upload_id_marker: Option<String>,
+    /// Key marker for the next page.
+    pub next_key_marker: Option<String>,
+    /// Upload id marker for the next page.
+    pub next_upload_id_marker: Option<String>,
+    /// Maximum number of uploads requested.
+    pub max_uploads: Option<u32>,
+    /// Whether the listing is truncated.
+    pub is_truncated: bool,
+    /// Listed uploads.
+    pub uploads: Vec<MultipartUpload>,
+}
+
+#[cfg(feature = "multipart")]
+/// An in-progress multipart upload.
+#[derive(Debug)]
+pub struct MultipartUpload {
+    /// Object key.
+    pub key: String,
+    /// Upload id.
+    pub upload_id: String,
+    /// Initiation timestamp, if provided.
+    pub initiated: Option<String>,
+}
+
+#[cfg(feature = "multipart")]
 /// Metadata for a multipart part.
 #[derive(Debug)]
 pub struct Part {

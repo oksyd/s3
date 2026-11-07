@@ -1010,11 +1010,37 @@ async fn s3_compat_async_multipart_abort_roundtrip() -> Result<(), Error> {
                 .send()
                 .await?;
 
+            let listed = client
+                .objects()
+                .list_multipart_uploads(&bucket)
+                .prefix(key)?
+                .send()
+                .await?;
+            assert!(
+                listed
+                    .uploads
+                    .iter()
+                    .any(|upload| upload.key == key && upload.upload_id == upload_id)
+            );
+
             client
                 .objects()
                 .abort_multipart_upload(&bucket, key, &upload_id)
                 .send()
                 .await?;
+
+            let listed = client
+                .objects()
+                .list_multipart_uploads(&bucket)
+                .prefix(key)?
+                .send()
+                .await?;
+            assert!(
+                listed
+                    .uploads
+                    .iter()
+                    .all(|upload| upload.upload_id != upload_id)
+            );
 
             match client
                 .objects()
