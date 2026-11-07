@@ -158,6 +158,40 @@ pub(crate) struct XmlPart {
 
 #[cfg(feature = "multipart")]
 #[derive(Debug, Deserialize)]
+pub(crate) struct XmlListMultipartUploadsResult {
+    #[serde(rename = "Bucket")]
+    pub(crate) bucket: Option<String>,
+    #[serde(rename = "Prefix")]
+    pub(crate) prefix: Option<String>,
+    #[serde(rename = "KeyMarker")]
+    pub(crate) key_marker: Option<String>,
+    #[serde(rename = "UploadIdMarker")]
+    pub(crate) upload_id_marker: Option<String>,
+    #[serde(rename = "NextKeyMarker")]
+    pub(crate) next_key_marker: Option<String>,
+    #[serde(rename = "NextUploadIdMarker")]
+    pub(crate) next_upload_id_marker: Option<String>,
+    #[serde(rename = "MaxUploads")]
+    pub(crate) max_uploads: Option<u32>,
+    #[serde(rename = "IsTruncated")]
+    pub(crate) is_truncated: bool,
+    #[serde(rename = "Upload", default)]
+    pub(crate) uploads: Vec<XmlMultipartUpload>,
+}
+
+#[cfg(feature = "multipart")]
+#[derive(Debug, Deserialize)]
+pub(crate) struct XmlMultipartUpload {
+    #[serde(rename = "Key")]
+    pub(crate) key: String,
+    #[serde(rename = "UploadId")]
+    pub(crate) upload_id: String,
+    #[serde(rename = "Initiated")]
+    pub(crate) initiated: Option<String>,
+}
+
+#[cfg(feature = "multipart")]
+#[derive(Debug, Deserialize)]
 pub(crate) struct XmlCopyPartResult {
     #[serde(rename = "ETag")]
     pub(crate) etag: Option<String>,
@@ -444,6 +478,31 @@ impl From<XmlListPartsResult> for ListPartsOutput {
                     etag: p.etag,
                     size: p.size,
                     last_modified: p.last_modified,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[cfg(feature = "multipart")]
+impl From<XmlListMultipartUploadsResult> for ListMultipartUploadsOutput {
+    fn from(value: XmlListMultipartUploadsResult) -> Self {
+        Self {
+            bucket: value.bucket,
+            prefix: value.prefix,
+            key_marker: value.key_marker,
+            upload_id_marker: value.upload_id_marker,
+            next_key_marker: value.next_key_marker,
+            next_upload_id_marker: value.next_upload_id_marker,
+            max_uploads: value.max_uploads,
+            is_truncated: value.is_truncated,
+            uploads: value
+                .uploads
+                .into_iter()
+                .map(|u| MultipartUpload {
+                    key: u.key,
+                    upload_id: u.upload_id,
+                    initiated: u.initiated,
                 })
                 .collect(),
         }

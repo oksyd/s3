@@ -765,10 +765,34 @@ fn s3_compat_blocking_multipart_abort_roundtrip() -> Result<(), Error> {
             .body_bytes(Bytes::from_static(b"tiny"))
             .send()?;
 
+        let listed = client
+            .objects()
+            .list_multipart_uploads(&bucket)
+            .prefix(key)?
+            .send()?;
+        assert!(
+            listed
+                .uploads
+                .iter()
+                .any(|upload| upload.key == key && upload.upload_id == upload_id)
+        );
+
         client
             .objects()
             .abort_multipart_upload(&bucket, key, &upload_id)
             .send()?;
+
+        let listed = client
+            .objects()
+            .list_multipart_uploads(&bucket)
+            .prefix(key)?
+            .send()?;
+        assert!(
+            listed
+                .uploads
+                .iter()
+                .all(|upload| upload.upload_id != upload_id)
+        );
 
         match client.objects().list_parts(&bucket, key, &upload_id).send() {
             Ok(_) => panic!("expected error after abort"),

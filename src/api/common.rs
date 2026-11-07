@@ -17,6 +17,8 @@ pub(crate) const MAX_LIST_OBJECTS_KEYS: u32 = 1_000;
 #[cfg(feature = "multipart")]
 pub(crate) const MAX_LIST_PARTS: u32 = 1_000;
 #[cfg(feature = "multipart")]
+pub(crate) const MAX_LIST_MULTIPART_UPLOADS: u32 = 1_000;
+#[cfg(feature = "multipart")]
 pub(crate) const MAX_UPLOAD_PART_NUMBER: u32 = 10_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,6 +233,16 @@ pub(crate) fn validate_max_parts(max_parts: u32) -> Result<()> {
     if max_parts == 0 || max_parts > MAX_LIST_PARTS {
         return Err(Error::invalid_config(
             "max_parts must be in the range 1..=1000",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "multipart")]
+pub(crate) fn validate_max_uploads(max_uploads: u32) -> Result<()> {
+    if max_uploads == 0 || max_uploads > MAX_LIST_MULTIPART_UPLOADS {
+        return Err(Error::invalid_config(
+            "max_uploads must be in the range 1..=1000",
         ));
     }
     Ok(())
