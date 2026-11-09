@@ -1,7 +1,7 @@
 use std::{borrow::Cow, sync::Arc, time::Duration};
 
 use crate::TlsRootStore;
-use http::{HeaderMap, Method};
+use http::{HeaderMap, Method, Uri};
 use time::OffsetDateTime;
 use url::Url;
 
@@ -142,8 +142,8 @@ impl Client {
         query_params: &[(String, String)],
         headers: &mut HeaderMap,
         body: AsyncBody,
-    ) -> Result<(Url, AsyncBody)> {
-        let resolved = util::url::resolve_url(
+    ) -> Result<(Uri, AsyncBody)> {
+        let resolved = util::url::resolve_uri(
             &self.inner.endpoint,
             bucket,
             key,
@@ -170,7 +170,7 @@ impl Client {
             )?;
         }
 
-        Ok((resolved.url, body))
+        Ok((resolved, body))
     }
 
     pub(crate) fn presign(
@@ -188,7 +188,7 @@ impl Client {
             )
         })?;
 
-        let resolved = util::url::resolve_url(
+        let resolved = util::url::resolve_uri(
             &self.inner.endpoint,
             Some(bucket),
             Some(key),
@@ -223,7 +223,7 @@ impl Client {
             .await?
             .ok_or_else(|| Error::invalid_config("presign requires credentials"))?;
 
-        let resolved = util::url::resolve_url(
+        let resolved = util::url::resolve_uri(
             &self.inner.endpoint,
             Some(bucket),
             Some(key),

@@ -84,7 +84,7 @@ async fn s3_compat_async_put_get_list_delete_roundtrip() -> Result<(), Error> {
 
             let presigned = client.objects().presign_get(&bucket, key).build()?;
             let resp = reqwest::Client::new()
-                .request(presigned.method.clone(), presigned.url.clone())
+                .request(presigned.method.clone(), presigned.url.to_string())
                 .headers(presigned.headers.clone())
                 .send()
                 .await
@@ -574,7 +574,7 @@ async fn s3_compat_async_list_v2_manual_pagination() -> Result<(), Error> {
             let out = client
                 .objects()
                 .list_v2(&bucket)
-                .start_after("a.txt")?
+                .start_after("a.txt")
                 .send()
                 .await?;
             assert!(out.contents.iter().all(|o| o.key.as_str() > "a.txt"));
@@ -607,7 +607,7 @@ async fn s3_compat_async_list_v2_pager_and_common_prefixes() -> Result<(), Error
             let mut pager = client
                 .objects()
                 .list_v2(&bucket)
-                .prefix("a/")?
+                .prefix("a/")
                 .max_keys(2)?
                 .pager();
             let mut keys = Vec::new();
@@ -620,7 +620,7 @@ async fn s3_compat_async_list_v2_pager_and_common_prefixes() -> Result<(), Error
             let out = client
                 .objects()
                 .list_v2(&bucket)
-                .delimiter("/")?
+                .delimiter("/")
                 .send()
                 .await?;
             assert!(out.common_prefixes.iter().any(|p| p == "a/"));
@@ -662,7 +662,7 @@ async fn s3_compat_async_presign_put_head_delete_roundtrip() -> Result<(), Error
                 .build()?;
 
             let resp = reqwest::Client::new()
-                .request(presigned_put.method.clone(), presigned_put.url.clone())
+                .request(presigned_put.method.clone(), presigned_put.url.to_string())
                 .headers(presigned_put.headers.clone())
                 .body(body.clone())
                 .send()
@@ -676,7 +676,10 @@ async fn s3_compat_async_presign_put_head_delete_roundtrip() -> Result<(), Error
 
             let presigned_head = client.objects().presign_head(&bucket, key).build()?;
             let resp = reqwest::Client::new()
-                .request(presigned_head.method.clone(), presigned_head.url.clone())
+                .request(
+                    presigned_head.method.clone(),
+                    presigned_head.url.to_string(),
+                )
                 .headers(presigned_head.headers.clone())
                 .send()
                 .await
@@ -693,7 +696,7 @@ async fn s3_compat_async_presign_put_head_delete_roundtrip() -> Result<(), Error
             let resp = reqwest::Client::new()
                 .request(
                     presigned_delete.method.clone(),
-                    presigned_delete.url.clone(),
+                    presigned_delete.url.to_string(),
                 )
                 .headers(presigned_delete.headers.clone())
                 .send()
@@ -1013,7 +1016,7 @@ async fn s3_compat_async_multipart_abort_roundtrip() -> Result<(), Error> {
             let listed = client
                 .objects()
                 .list_multipart_uploads(&bucket)
-                .prefix(key)?
+                .prefix(key)
                 .send()
                 .await?;
             assert!(
@@ -1032,7 +1035,7 @@ async fn s3_compat_async_multipart_abort_roundtrip() -> Result<(), Error> {
             let listed = client
                 .objects()
                 .list_multipart_uploads(&bucket)
-                .prefix(key)?
+                .prefix(key)
                 .send()
                 .await?;
             assert!(

@@ -4,7 +4,7 @@ use time::OffsetDateTime;
 use url::Url;
 
 #[cfg(any(feature = "async", feature = "blocking"))]
-use http::{HeaderMap, Method};
+use http::{HeaderMap, Method, Uri};
 
 use crate::{
     auth::CredentialsSnapshot,
@@ -16,7 +16,7 @@ use crate::{auth::Region, util};
 #[cfg(any(feature = "async", feature = "blocking"))]
 pub(crate) fn sign_with_snapshot(
     method: &Method,
-    resolved: &crate::util::url::ResolvedUrl,
+    resolved: &Uri,
     headers: &mut HeaderMap,
     payload_hash: &str,
     region: &Region,

@@ -293,18 +293,6 @@ pub(crate) fn validate_query_token(name: &'static str, value: &str) -> Result<()
     Ok(())
 }
 
-pub(crate) fn validate_query_value(name: &'static str, value: &str) -> Result<()> {
-    if value.is_empty() {
-        return Err(Error::invalid_config(format!("{name} must not be empty")));
-    }
-    if value.bytes().any(|b| b.is_ascii_control()) {
-        return Err(Error::invalid_config(format!(
-            "{name} must not contain ASCII control characters"
-        )));
-    }
-    Ok(())
-}
-
 pub(crate) fn push_delete_object(
     objects: &mut Vec<DeleteObjectIdentifier>,
     object: DeleteObjectIdentifier,
@@ -704,19 +692,6 @@ mod tests {
         assert!(validate_query_token("continuation_token", "tok en").is_err());
         assert!(validate_query_token("continuation_token", "tok\nen").is_err());
         assert!(validate_query_token("continuation_token", "opaque/token+id=").is_ok());
-    }
-
-    #[test]
-    fn validate_query_value_rejects_ambiguous_values() {
-        validate_query_value("prefix", "photos/2026 ").unwrap();
-
-        for value in ["", "line\nbreak", "bad\u{7f}"] {
-            let err = validate_query_value("prefix", value).expect_err("expected invalid query");
-            match err {
-                Error::InvalidConfig { .. } => {}
-                other => panic!("expected InvalidConfig, got {other:?}"),
-            }
-        }
     }
 
     #[test]

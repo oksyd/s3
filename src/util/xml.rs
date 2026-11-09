@@ -99,7 +99,7 @@ fn trim_optional_string(value: &mut Option<String>) {
 
 pub(crate) fn parse_list_objects_v2(body: &str) -> Result<types::ListObjectsV2Output, Error> {
     let parsed = parse_response_xml::<xml::XmlListBucketResult>(body, "ListBucketResult")?;
-    Ok(types::ListObjectsV2Output::from(parsed))
+    parsed.try_into()
 }
 
 pub(crate) fn parse_list_buckets(body: &str) -> Result<types::ListBucketsOutput, Error> {
@@ -269,11 +269,8 @@ pub(crate) fn parse_list_parts(body: &str) -> Result<types::ListPartsOutput, Err
 pub(crate) fn parse_list_multipart_uploads(
     body: &str,
 ) -> Result<types::ListMultipartUploadsOutput, Error> {
-    let parsed = parse_response_xml::<xml::XmlListMultipartUploadsResult>(
-        body,
-        "ListMultipartUploadsResult",
-    )?;
-    Ok(types::ListMultipartUploadsOutput::from(parsed))
+    parse_response_xml::<xml::XmlListMultipartUploadsResult>(body, "ListMultipartUploadsResult")?
+        .try_into()
 }
 
 #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
@@ -1149,13 +1146,13 @@ mod tests {
     #[test]
     fn listings_require_explicit_truncation_state() {
         assert!(
-            parse_list_objects_v2("<ListBucketResult><Name>bucket</Name></ListBucketResult>")
+            parse_list_objects_v2("<ListBucketResult><EncodingType>url</EncodingType><Name>bucket</Name></ListBucketResult>")
                 .is_err()
         );
         #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
         assert!(parse_list_parts("<ListPartsResult/>").is_err());
         #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
-        assert!(parse_list_multipart_uploads("<ListMultipartUploadsResult/>").is_err());
+        assert!(parse_list_multipart_uploads("<ListMultipartUploadsResult><EncodingType>url</EncodingType></ListMultipartUploadsResult>").is_err());
     }
 
     #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
@@ -1164,6 +1161,7 @@ mod tests {
         let xml = r#"
 <ListMultipartUploadsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <Bucket>bucket-a</Bucket>
+  <EncodingType>url</EncodingType>
   <KeyMarker></KeyMarker>
   <UploadIdMarker></UploadIdMarker>
   <NextKeyMarker>uploads/b</NextKeyMarker>
@@ -1196,6 +1194,58 @@ mod tests {
             Some("2020-01-01T00:00:00.000Z")
         );
         assert!(out.uploads[1].initiated.is_none());
+    }
+
+    #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+    #[test]
+    fn decodes_url_encoded_multipart_keys_without_changing_upload_ids() {
+        let xml = r#"
+<ListMultipartUploadsResult>
+  <EncodingType>url</EncodingType>
+  <Prefix>dir%2F</Prefix>
+  <KeyMarker>old%252Fkey</KeyMarker>
+  <UploadIdMarker>id%2F+old</UploadIdMarker>
+  <NextKeyMarker>dir%2F%E4%B8%AD%0A%25+end</NextKeyMarker>
+  <NextUploadIdMarker>id%2F+next</NextUploadIdMarker>
+  <IsTruncated>true</IsTruncated>
+  <Upload><Key>dir%2F%E4%B8%AD%00%25+end</Key><UploadId>id%2F+value</UploadId></Upload>
+</ListMultipartUploadsResult>"#;
+        let output = parse_list_multipart_uploads(xml).unwrap();
+        assert_eq!(output.prefix.as_deref(), Some("dir/"));
+        assert_eq!(output.key_marker.as_deref(), Some("old%2Fkey"));
+        assert_eq!(output.next_key_marker.as_deref(), Some("dir/中\n%+end"));
+        assert_eq!(output.upload_id_marker.as_deref(), Some("id%2F+old"));
+        assert_eq!(output.next_upload_id_marker.as_deref(), Some("id%2F+next"));
+        assert_eq!(output.uploads[0].key, "dir/中\0%+end");
+        assert_eq!(output.uploads[0].upload_id, "id%2F+value");
+    }
+
+    #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+    #[test]
+    fn rejects_unsupported_or_malformed_multipart_key_encoding() {
+        for encoding in ["", "<EncodingType>other</EncodingType>"] {
+            let xml = format!(
+                "<ListMultipartUploadsResult>{encoding}<IsTruncated>false</IsTruncated></ListMultipartUploadsResult>"
+            );
+            assert!(matches!(
+                parse_list_multipart_uploads(&xml),
+                Err(Error::Decode { .. })
+            ));
+        }
+        for key in [
+            "incomplete%",
+            "incomplete%1",
+            "invalid%zz",
+            "invalid-utf8%FF",
+        ] {
+            let xml = format!(
+                "<ListMultipartUploadsResult><EncodingType>url</EncodingType><IsTruncated>false</IsTruncated><Upload><Key>{key}</Key><UploadId>id</UploadId></Upload></ListMultipartUploadsResult>"
+            );
+            assert!(matches!(
+                parse_list_multipart_uploads(&xml),
+                Err(Error::Decode { .. })
+            ));
+        }
     }
 
     #[test]
@@ -1372,6 +1422,7 @@ mod tests {
     fn parses_list_objects_v2() {
         let xml = r#"
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <EncodingType>url</EncodingType>
   <Name>bucket-a</Name>
   <KeyCount>1</KeyCount>
   <MaxKeys>1000</MaxKeys>
@@ -1390,6 +1441,66 @@ mod tests {
         assert_eq!(out.contents.len(), 1);
         assert_eq!(out.contents[0].key, "logs/app.txt");
         assert_eq!(out.contents[0].etag.as_deref(), Some("\"etag-1\""));
+    }
+
+    #[test]
+    fn decodes_list_objects_keys_and_prefixes_but_preserves_tokens() {
+        let body = r#"<ListBucketResult>
+          <Name>bucket</Name><EncodingType>url</EncodingType><IsTruncated>true</IsTruncated>
+          <Prefix>a%2F%00</Prefix><Delimiter>%0A</Delimiter>
+          <ContinuationToken>token%2F+one</ContinuationToken>
+          <NextContinuationToken>token%2F+two</NextContinuationToken>
+          <Contents><Key>a%2F..%2F%E4%B8%AD%0A%25+%252F</Key><Size>1</Size></Contents>
+          <CommonPrefixes><Prefix>a%2F%00b%2F</Prefix></CommonPrefixes>
+        </ListBucketResult>"#;
+        let output = parse_list_objects_v2(body).unwrap();
+        assert_eq!(output.prefix.as_deref(), Some("a/\0"));
+        assert_eq!(output.delimiter.as_deref(), Some("\n"));
+        assert_eq!(output.contents[0].key, "a/../中\n%+%2F");
+        assert_eq!(output.common_prefixes, ["a/\0b/"]);
+        assert_eq!(output.continuation_token.as_deref(), Some("token%2F+one"));
+        assert_eq!(
+            output.next_continuation_token.as_deref(),
+            Some("token%2F+two")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_unsupported_list_objects_encoding() {
+        for encoding in ["", "<EncodingType>other</EncodingType>"] {
+            let body = format!(
+                "<ListBucketResult><Name>bucket</Name>{encoding}<IsTruncated>false</IsTruncated></ListBucketResult>"
+            );
+            assert!(matches!(
+                parse_list_objects_v2(&body),
+                Err(Error::Decode { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn delete_objects_preserves_xml_representable_keys() {
+        let key = "dir/../a\r\n\t<&>\u{7f}";
+        let body =
+            encode_delete_objects(&[DeleteObjectIdentifier::new(key).unwrap()], false).unwrap();
+        #[derive(serde::Deserialize)]
+        struct Delete {
+            #[serde(rename = "Object")]
+            object: Item,
+        }
+        #[derive(serde::Deserialize)]
+        struct Item {
+            #[serde(rename = "Key")]
+            key: String,
+        }
+        let text = std::str::from_utf8(&body).unwrap();
+        // Literal CR would be normalized by XML parsers, so it must be escaped.
+        assert!(!text.contains('\r'));
+        let decoded: Delete = quick_xml::de::from_str(text).unwrap();
+        assert_eq!(decoded.object.key, key);
+        for invalid in ["key\0", "key\u{1f}", "key\u{fffe}", "key\u{ffff}"] {
+            assert!(DeleteObjectIdentifier::new(invalid).is_err());
+        }
     }
 
     #[test]
@@ -1660,7 +1771,7 @@ mod tests {
     #[test]
     fn delete_object_identifier_rejects_invalid_values() {
         assert_invalid_config(DeleteObjectIdentifier::new(""), "object key");
-        assert_invalid_config(DeleteObjectIdentifier::new("a/../b"), "path segments");
+        DeleteObjectIdentifier::new("a/../b").unwrap();
         assert_invalid_config(
             DeleteObjectIdentifier::new("key")
                 .unwrap()

@@ -28,7 +28,7 @@ pub(crate) async fn assume_role_async(
         assume_role_request(region, role_arn, role_session_name, source_credentials)?;
 
     let client = sts_async_client(Duration::from_secs(10), tls_root_store)?;
-    let resp = send_form_async(&client, url.into(), headers, body).await?;
+    let resp = send_form_async(&client, url.to_string(), headers, body).await?;
     let text = sts_response_text(resp.status(), resp.headers(), resp.body())?;
 
     parse_assume_role_response(text)
@@ -48,7 +48,7 @@ pub(crate) fn assume_role_blocking(
         assume_role_request(region, role_arn, role_session_name, source_credentials)?;
 
     let client = sts_blocking_client(Duration::from_secs(10), tls_root_store)?;
-    let resp = send_form_blocking(&client, url.into(), headers, body)?;
+    let resp = send_form_blocking(&client, url.to_string(), headers, body)?;
     let text = sts_response_text(resp.status(), resp.headers(), resp.body())?;
 
     parse_assume_role_response(text)
@@ -59,7 +59,7 @@ fn assume_role_request(
     role_arn: &str,
     role_session_name: &str,
     source_credentials: &Credentials,
-) -> Result<(url::Url, HeaderMap, Bytes), Error> {
+) -> Result<(http::Uri, HeaderMap, Bytes), Error> {
     validate_assume_role_inputs(role_arn, role_session_name)?;
 
     let endpoint = sts_regional_endpoint(region.as_str(), None)?;
@@ -74,7 +74,7 @@ fn assume_role_request(
     let payload_hash = crate::util::signing::sha256_hex(&body_bytes);
 
     let resolved =
-        crate::util::url::resolve_url(&endpoint, None, None, &[], AddressingStyle::Path)?;
+        crate::util::url::resolve_uri(&endpoint, None, None, &[], AddressingStyle::Path)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -91,7 +91,7 @@ fn assume_role_request(
         crate::util::signing::SigV4Params::new(region, SERVICE, source_credentials, now),
     )?;
 
-    Ok((resolved.url, headers, body_bytes))
+    Ok((resolved, headers, body_bytes))
 }
 
 #[cfg(feature = "async")]
@@ -103,7 +103,7 @@ pub(crate) async fn assume_role_with_web_identity_env_async(
     let (url, headers, body) = web_identity_request()?;
 
     let client = sts_async_client(Duration::from_secs(10), tls_root_store)?;
-    let resp = send_form_async(&client, url.into(), headers, body).await?;
+    let resp = send_form_async(&client, url.to_string(), headers, body).await?;
     let text = sts_response_text(resp.status(), resp.headers(), resp.body())?;
 
     parse_assume_role_with_web_identity_response(text)
@@ -118,7 +118,7 @@ pub(crate) fn assume_role_with_web_identity_env_blocking(
     let (url, headers, body) = web_identity_request()?;
 
     let client = sts_blocking_client(Duration::from_secs(10), tls_root_store)?;
-    let resp = send_form_blocking(&client, url.into(), headers, body)?;
+    let resp = send_form_blocking(&client, url.to_string(), headers, body)?;
     let text = sts_response_text(resp.status(), resp.headers(), resp.body())?;
 
     parse_assume_role_with_web_identity_response(text)

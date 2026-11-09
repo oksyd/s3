@@ -4,13 +4,13 @@ use std::time::Duration;
 use bytes::Bytes;
 #[cfg(test)]
 use http::StatusCode;
+use http::Uri;
 use http::header::USER_AGENT;
 use http::{HeaderMap, HeaderValue, Method};
 use reqx::{
     advanced::TlsRootStore,
     prelude::{RedirectPolicy, RetryPolicy, StatusPolicy},
 };
-use url::Url;
 
 use crate::{
     error::Result,
@@ -80,7 +80,7 @@ impl BlockingTransport {
     pub(crate) fn send(
         &self,
         method: Method,
-        url: Url,
+        url: Uri,
         headers: HeaderMap,
         mut body: BlockingBody,
     ) -> Result<reqx::Response> {
@@ -130,7 +130,7 @@ impl BlockingTransport {
     pub(crate) fn send_stream(
         &self,
         method: Method,
-        url: Url,
+        url: Uri,
         headers: HeaderMap,
         mut body: BlockingBody,
     ) -> Result<reqx::blocking::ResponseStream> {
@@ -195,7 +195,7 @@ impl BlockingTransport {
     fn build_request(
         &self,
         method: &Method,
-        url: &Url,
+        url: &Uri,
         headers: &HeaderMap,
         body: BlockingBody,
     ) -> Result<reqx::blocking::RequestBuilder> {
@@ -203,7 +203,7 @@ impl BlockingTransport {
 
         let mut req = self
             .client
-            .request(method.clone(), url.as_str().to_string())
+            .request(method.clone(), url.to_string())
             .header(USER_AGENT, self.user_agent.clone());
 
         for name in headers.keys() {
@@ -367,6 +367,66 @@ mod tests {
         Ok((addr, handle, captured))
     }
 
+    #[cfg(feature = "multipart")]
+    #[test]
+    fn multipart_listing_preserves_keys_and_both_markers() -> Result<()> {
+        let body = r#"<ListMultipartUploadsResult><EncodingType>url</EncodingType>
+          <IsTruncated>true</IsTruncated><NextKeyMarker>a%2F..%2F%00%2B%25</NextKeyMarker>
+          <NextUploadIdMarker>id%2F+next</NextUploadIdMarker>
+          <Upload><Key>a%2F..%2F%00%2B%25</Key><UploadId>first</UploadId></Upload>
+          <Upload><Key>a%2F..%2F%00%2B%25</Key><UploadId>second</UploadId></Upload>
+        </ListMultipartUploadsResult>"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (addr, handle, captured) = spawn_request_capture_server(response.into_bytes())?;
+        let client = crate::BlockingClient::builder(format!("http://{addr}"))?
+            .region("us-east-1")
+            .max_attempts(1)
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        let page = client
+            .objects()
+            .list_multipart_uploads("bucket")
+            .prefix("a/\0")
+            .key_marker("a/../\0+%")
+            .upload_id_marker("id%2F+old")?
+            .max_uploads(2)?
+            .send()?;
+        handle.join().expect("test server thread");
+        let request = captured.lock().expect("capture lock");
+        let request = std::str::from_utf8(&request).unwrap();
+        assert!(request.starts_with("GET /bucket?encoding-type=url&key-marker=a%2F..%2F%00%2B%25&max-uploads=2&prefix=a%2F%00&upload-id-marker=id%252F%2Bold&uploads= HTTP/1.1\r\n"));
+        assert_eq!(page.next_key_marker.as_deref(), Some("a/../\0+%"));
+        assert_eq!(page.next_upload_id_marker.as_deref(), Some("id%2F+next"));
+        assert_eq!(page.uploads.len(), 2);
+        assert_eq!(page.uploads[0].key, page.uploads[1].key);
+        assert_ne!(page.uploads[0].upload_id, page.uploads[1].upload_id);
+        Ok(())
+    }
+
+    #[test]
+    fn object_requests_preserve_key_paths() -> Result<()> {
+        let (addr, handle, captured) = spawn_request_capture_server(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        )?;
+        let client = crate::BlockingClient::builder(format!("http://{addr}"))?
+            .region("us-east-1")
+            .max_attempts(1)
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        client
+            .objects()
+            .get("bucket", "a/../b/./%2e//中\n")
+            .send()?;
+        handle.join().expect("test server thread");
+        let request = captured.lock().expect("capture lock");
+        let request = std::str::from_utf8(&request).unwrap();
+        assert!(request.starts_with("GET /bucket/a/../b/./%252e//%E4%B8%AD%0A HTTP/1.1\r\n"));
+        Ok(())
+    }
+
     #[test]
     fn send_bytes_sets_content_length() -> Result<()> {
         let (addr, handle, captured) = spawn_request_capture_server(
@@ -381,7 +441,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::BackendDefault,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         transport.send(
@@ -483,7 +543,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let resp_result = transport.send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty);
@@ -508,7 +568,7 @@ mod tests {
             Some(Duration::from_millis(100)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse("http://127.0.0.1:1/private/object/key?token=secret")
+        let url = Uri::try_from("http://127.0.0.1:1/private/object/key?token=secret")
             .map_err(|_| Error::invalid_config("invalid test URL"))?;
 
         let err = match transport.send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty) {
@@ -555,7 +615,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let resp = transport.send(Method::HEAD, url, HeaderMap::new(), BlockingBody::Empty)?;
@@ -593,7 +653,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let resp = transport
@@ -627,7 +687,7 @@ mod tests {
                 Some(Duration::from_secs(5)),
                 reqx::TlsRootStore::BackendDefault,
             )?;
-            let url = Url::parse(&format!("http://{addr}/"))
+            let url = Uri::try_from(&format!("http://{addr}/"))
                 .map_err(|_| Error::invalid_config("invalid test server URL"))?;
             let status = if streaming {
                 transport
@@ -675,7 +735,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let resp = transport.send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty)?;
@@ -709,7 +769,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let resp = transport
@@ -744,7 +804,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let resp = transport
@@ -783,7 +843,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let resp = transport.send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty)?;
@@ -815,7 +875,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let resp = transport.send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty)?;
@@ -855,7 +915,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let resp = transport.send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty)?;
@@ -894,7 +954,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let resp = transport.send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty)?;
@@ -926,7 +986,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let mut resp =
@@ -965,7 +1025,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let resp =
@@ -1000,7 +1060,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let resp =
@@ -1032,7 +1092,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let limited =
@@ -1069,7 +1129,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let outcome = transport.send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty);
@@ -1096,7 +1156,7 @@ mod tests {
             Some(Duration::from_secs(5)),
             reqx::TlsRootStore::System,
         )?;
-        let url = Url::parse(&format!("http://{addr}/"))
+        let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
 
         let outcome = transport.send(Method::GET, url, HeaderMap::new(), BlockingBody::Empty);

@@ -1,64 +1,33 @@
 use crate::util::validation::validate_object_key;
-use url::{Host, Url};
+use http::Uri;
+use url::{Host, Position, Url};
 
 use crate::{auth::AddressingStyle, error::Error};
 
-#[derive(Debug)]
-pub(crate) struct ResolvedUrl {
-    pub(crate) url: Url,
-    pub(crate) canonical_uri: String,
-    pub(crate) canonical_query_string: String,
-}
-
-pub(crate) fn resolve_url(
+pub(crate) fn resolve_uri(
     base_url: &Url,
     bucket: Option<&str>,
     key: Option<&str>,
     query_params: &[(String, String)],
     addressing: AddressingStyle,
-) -> Result<ResolvedUrl, Error> {
+) -> Result<Uri, Error> {
     if !base_url.username().is_empty() || base_url.password().is_some() {
         return Err(Error::invalid_config("endpoint must not include user info"));
     }
 
     let mut url = base_url.clone();
 
-    let canonical_query_string = crate::util::encode::canonical_query_string(query_params);
-
-    if canonical_query_string.is_empty() {
-        url.set_query(None);
-    } else {
-        url.set_query(Some(&canonical_query_string));
-    }
-
-    let Some(bucket) = bucket else {
-        url.set_path("/");
-        return Ok(ResolvedUrl {
-            url,
-            canonical_uri: "/".to_string(),
-            canonical_query_string,
-        });
-    };
-    validate_bucket_name(bucket)?;
-    if let Some(key) = key {
-        validate_object_key(key)?;
-    }
-
-    let host = base_url
-        .host_str()
-        .ok_or_else(|| Error::invalid_config("endpoint must include host"))?;
-
-    let virtual_hosted = use_virtual_hosted_style(base_url, bucket, addressing);
-
-    let (final_host, raw_path) = match virtual_hosted {
-        false => {
-            let raw_path = match key {
-                Some(key) => format!("/{bucket}/{key}"),
-                None => format!("/{bucket}"),
-            };
-            (None, raw_path)
+    let raw_path = if let Some(bucket) = bucket {
+        validate_bucket_name(bucket)?;
+        if let Some(key) = key {
+            validate_object_key(key)?;
         }
-        true => {
+
+        let host = base_url
+            .host_str()
+            .ok_or_else(|| Error::invalid_config("endpoint must include host"))?;
+
+        if use_virtual_hosted_style(base_url, bucket, addressing) {
             if endpoint_has_ip_host(base_url) {
                 return Err(Error::invalid_config(
                     "virtual-hosted-style requires a domain endpoint host",
@@ -69,27 +38,36 @@ pub(crate) fn resolve_url(
                     "bucket is not DNS compatible for virtual-hosted-style",
                 ));
             }
-            let raw_path = match key {
+            url.set_host(Some(&format!("{bucket}.{host}")))
+                .map_err(|_| Error::invalid_config("invalid endpoint host"))?;
+            match key {
                 Some(key) => format!("/{key}"),
-                _ => "/".to_string(),
-            };
-            (Some(format!("{bucket}.{host}")), raw_path)
+                None => "/".to_string(),
+            }
+        } else {
+            match key {
+                Some(key) => format!("/{bucket}/{key}"),
+                None => format!("/{bucket}"),
+            }
         }
+    } else {
+        "/".to_string()
     };
 
-    let canonical_uri = crate::util::encode::aws_percent_encode_path(&raw_path);
-
-    url.set_path(&canonical_uri);
-    if let Some(final_host) = final_host {
-        url.set_host(Some(&final_host))
-            .map_err(|_| Error::invalid_config("invalid endpoint host"))?;
+    // S3 keys are opaque: WHATWG URL path setters would normalize '.' and '..'.
+    // Keep the encoded HTTP path intact for both signing and transmission.
+    let mut path_and_query = crate::util::encode::aws_percent_encode_path(&raw_path);
+    let query = crate::util::encode::canonical_query_string(query_params);
+    if !query.is_empty() {
+        path_and_query.push('?');
+        path_and_query.push_str(&query);
     }
-
-    Ok(ResolvedUrl {
-        url,
-        canonical_uri,
-        canonical_query_string,
-    })
+    Uri::builder()
+        .scheme(url.scheme())
+        .authority(&url[Position::BeforeHost..Position::AfterPort])
+        .path_and_query(path_and_query)
+        .build()
+        .map_err(|_| Error::invalid_config("invalid request URI"))
 }
 
 fn use_virtual_hosted_style(base_url: &Url, bucket: &str, addressing: AddressingStyle) -> bool {
@@ -186,7 +164,7 @@ mod tests {
     #[test]
     fn resolves_path_style_url_and_does_not_double_encode() {
         let base = Url::parse("https://example.com").unwrap();
-        let resolved = resolve_url(
+        let resolved = resolve_uri(
             &base,
             Some("my-bucket"),
             Some("a+b"),
@@ -195,14 +173,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(resolved.canonical_uri, "/my-bucket/a%2Bb");
-        assert_eq!(resolved.url.as_str(), "https://example.com/my-bucket/a%2Bb");
+        assert_eq!(resolved.path(), "/my-bucket/a%2Bb");
+        assert_eq!(resolved.to_string(), "https://example.com/my-bucket/a%2Bb");
     }
 
     #[test]
     fn resolves_virtual_hosted_style_url() {
         let base = Url::parse("https://s3.example.com").unwrap();
-        let resolved = resolve_url(
+        let resolved = resolve_uri(
             &base,
             Some("mybucket"),
             Some("a+b"),
@@ -211,14 +189,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(resolved.url.host_str().unwrap(), "mybucket.s3.example.com");
-        assert_eq!(resolved.canonical_uri, "/a%2Bb");
+        assert_eq!(resolved.host().unwrap(), "mybucket.s3.example.com");
+        assert_eq!(resolved.path(), "/a%2Bb");
     }
 
     #[test]
     fn auto_falls_back_to_path_style_for_dot_bucket_on_https() {
         let base = Url::parse("https://s3.example.com").unwrap();
-        let resolved = resolve_url(
+        let resolved = resolve_uri(
             &base,
             Some("bucket.with.dots"),
             Some("key"),
@@ -227,15 +205,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(resolved.url.host_str().unwrap(), "s3.example.com");
-        assert_eq!(resolved.canonical_uri, "/bucket.with.dots/key");
+        assert_eq!(resolved.host().unwrap(), "s3.example.com");
+        assert_eq!(resolved.path(), "/bucket.with.dots/key");
     }
 
     #[test]
     fn auto_falls_back_to_path_style_for_ip_endpoints() {
         for endpoint in ["http://127.0.0.1:9000", "http://[::1]:9000"] {
             let base = Url::parse(endpoint).unwrap();
-            let resolved = resolve_url(
+            let resolved = resolve_uri(
                 &base,
                 Some("mybucket"),
                 Some("key"),
@@ -244,16 +222,15 @@ mod tests {
             )
             .unwrap();
 
-            assert_eq!(resolved.canonical_uri, "/mybucket/key");
-            assert_eq!(resolved.url.path(), "/mybucket/key");
-            assert_eq!(resolved.url.host(), base.host());
+            assert_eq!(resolved.path(), "/mybucket/key");
+            assert_eq!(resolved.host(), base.host_str());
         }
     }
 
     #[test]
     fn virtual_hosted_style_allows_localhost_domain_endpoints() {
         let base = Url::parse("http://localhost:9000").unwrap();
-        let resolved = resolve_url(
+        let resolved = resolve_uri(
             &base,
             Some("mybucket"),
             Some("key"),
@@ -262,15 +239,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(resolved.url.host_str().unwrap(), "mybucket.localhost");
-        assert_eq!(resolved.canonical_uri, "/key");
+        assert_eq!(resolved.host().unwrap(), "mybucket.localhost");
+        assert_eq!(resolved.path(), "/key");
     }
 
     #[test]
     fn virtual_hosted_style_rejects_ip_endpoints() {
         for endpoint in ["http://127.0.0.1:9000", "http://[::1]:9000"] {
             let base = Url::parse(endpoint).unwrap();
-            let err = resolve_url(
+            let err = resolve_uri(
                 &base,
                 Some("mybucket"),
                 Some("key"),
@@ -287,7 +264,7 @@ mod tests {
     fn virtual_hosted_style_rejects_invalid_dns_labels() {
         let base = Url::parse("https://s3.example.com").unwrap();
         for bucket in ["bad-.bucket", "bad.-bucket"] {
-            let err = resolve_url(
+            let err = resolve_uri(
                 &base,
                 Some(bucket),
                 Some("key"),
@@ -303,7 +280,7 @@ mod tests {
     #[test]
     fn path_encoding_preserves_slash_in_key() {
         let base = Url::parse("https://example.com").unwrap();
-        let resolved = resolve_url(
+        let resolved = resolve_uri(
             &base,
             Some("my-bucket"),
             Some("a/b"),
@@ -312,13 +289,13 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(resolved.canonical_uri, "/my-bucket/a/b");
+        assert_eq!(resolved.path(), "/my-bucket/a/b");
     }
 
     #[test]
     fn query_params_are_canonicalized_and_applied_to_url() {
         let base = Url::parse("https://example.com").unwrap();
-        let resolved = resolve_url(
+        let resolved = resolve_uri(
             &base,
             Some("my-bucket"),
             Some("key"),
@@ -330,14 +307,13 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(resolved.canonical_query_string, "a=&b=2");
-        assert_eq!(resolved.url.query().unwrap_or(""), "a=&b=2");
+        assert_eq!(resolved.query().unwrap(), "a=&b=2");
     }
 
     #[test]
     fn empty_bucket_is_rejected() {
         let base = Url::parse("https://example.com").unwrap();
-        let err = match resolve_url(&base, Some(""), Some("key"), &[], AddressingStyle::Path) {
+        let err = match resolve_uri(&base, Some(""), Some("key"), &[], AddressingStyle::Path) {
             Ok(_) => panic!("empty bucket should be rejected"),
             Err(err) => err,
         };
@@ -352,7 +328,7 @@ mod tests {
     #[test]
     fn empty_object_key_is_rejected() {
         let base = Url::parse("https://example.com").unwrap();
-        let err = match resolve_url(
+        let err = match resolve_uri(
             &base,
             Some("my-bucket"),
             Some(""),
@@ -367,37 +343,61 @@ mod tests {
     }
 
     #[test]
-    fn object_key_dot_segments_are_rejected() {
+    fn object_key_dot_segments_are_preserved() {
         let base = Url::parse("https://example.com").unwrap();
         for key in [".", "..", "a/./b", "a/../b"] {
-            let err = resolve_url(
+            let uri = resolve_uri(
                 &base,
                 Some("my-bucket"),
                 Some(key),
                 &[],
                 AddressingStyle::Path,
             )
-            .expect_err("period-only key segments must be rejected");
+            .unwrap();
 
-            assert_invalid_config_contains(err, "path segments");
+            assert_eq!(uri.path(), format!("/my-bucket/{key}"));
         }
     }
 
     #[test]
-    fn object_key_control_characters_are_rejected() {
+    fn object_key_control_characters_are_percent_encoded() {
         let base = Url::parse("https://example.com").unwrap();
-        for key in ["line\nbreak", "bad\u{7f}"] {
-            let err = resolve_url(
+        for (key, expected) in [
+            ("line\nbreak", "/my-bucket/line%0Abreak"),
+            ("bad\u{7f}", "/my-bucket/bad%7F"),
+            ("key\0value", "/my-bucket/key%00value"),
+        ] {
+            let resolved = resolve_uri(
                 &base,
                 Some("my-bucket"),
                 Some(key),
                 &[],
                 AddressingStyle::Path,
             )
-            .expect_err("control-character key should be rejected");
+            .unwrap();
 
-            assert_invalid_config_contains(err, "control");
+            assert_eq!(resolved.path(), expected);
         }
+    }
+
+    #[test]
+    fn abort_url_preserves_special_key_and_upload_id() {
+        let base = Url::parse("https://s3.example.com").unwrap();
+        let resolved = resolve_uri(
+            &base,
+            Some("bucket"),
+            Some("dir/a\n\0%+"),
+            &[("uploadId".to_string(), "id+/=".to_string())],
+            AddressingStyle::VirtualHosted,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.path(), "/dir/a%0A%00%25%2B");
+        assert_eq!(resolved.query().unwrap(), "uploadId=id%2B%2F%3D");
+        assert_eq!(
+            resolved.to_string(),
+            "https://bucket.s3.example.com/dir/a%0A%00%25%2B?uploadId=id%2B%2F%3D"
+        );
     }
 
     #[test]
@@ -413,7 +413,7 @@ mod tests {
 
         for (bucket, expected) in cases {
             let err =
-                match resolve_url(&base, Some(bucket), Some("key"), &[], AddressingStyle::Path) {
+                match resolve_uri(&base, Some(bucket), Some("key"), &[], AddressingStyle::Path) {
                     Ok(_) => panic!("malformed bucket should be rejected"),
                     Err(err) => err,
                 };
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn endpoint_with_user_info_is_rejected() {
         let base = Url::parse("https://user:pass@example.com").unwrap();
-        let err = match resolve_url(
+        let err = match resolve_uri(
             &base,
             Some("my-bucket"),
             Some("key"),

@@ -59,7 +59,6 @@ ureq = { version = "3.4.2", default-features = false }
 [features]
 default = ["async", "rustls"]
 
-# Core modes
 async = [
   "dep:reqx",
   "dep:futures-core",
@@ -69,11 +68,9 @@ async = [
 ]
 blocking = ["dep:reqx"]
 
-# Observability
 tracing = ["dep:tracing"]
 metrics = ["dep:metrics"]
 
-# Optional capabilities
 checksums = ["dep:crc-fast", "dep:sha1"]
 multipart = []
 providers = []
@@ -81,14 +78,12 @@ credentials-profile = []
 credentials-imds = ["dep:serde_json"]
 credentials-sts = []
 
-# TLS selection
 rustls = [
   "reqx?/async-tls-rustls-ring",
   "reqx?/blocking-tls-rustls-ring",
 ]
 native-tls = ["reqx?/async-tls-native", "reqx?/blocking-tls-native"]
 
-# Optional escape hatch
 allow-both-tls = []
 unstable-raw = []
 

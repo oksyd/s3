@@ -13,8 +13,7 @@
 //!   [`Bucket`](crate::types::Bucket) for bucket listings
 //! - [`PresignedRequest`](crate::types::PresignedRequest) for presigned URL generation
 
-use http::{HeaderMap, Method};
-use url::Url;
+use http::{HeaderMap, Method, Uri};
 
 #[cfg(any(
     feature = "checksums",
@@ -38,8 +37,10 @@ pub(crate) mod xml;
 pub struct PresignedRequest {
     /// HTTP method to use.
     pub method: Method,
-    /// Fully signed request URL.
-    pub url: Url,
+    /// Fully signed request URI, preserving the object key path exactly.
+    ///
+    /// Pass this URI directly to an HTTP client that does not normalize paths.
+    pub url: Uri,
     /// Headers that must accompany the request.
     pub headers: HeaderMap,
 }
@@ -359,7 +360,7 @@ impl DeleteObjectIdentifier {
     /// Creates an identifier from an object key.
     pub fn new(key: impl Into<String>) -> Result<Self> {
         let key = key.into();
-        crate::util::validation::validate_object_key(&key)?;
+        crate::util::validation::validate_xml_object_key(&key)?;
         Ok(Self {
             key,
             version_id: None,

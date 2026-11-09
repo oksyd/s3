@@ -86,7 +86,7 @@ fn s3_compat_blocking_put_get_delete_roundtrip() -> Result<(), Error> {
         let pager = client
             .objects()
             .list_v2(&bucket)
-            .prefix("a/")?
+            .prefix("a/")
             .max_keys(2)?
             .pager();
         for page in pager {
@@ -96,7 +96,7 @@ fn s3_compat_blocking_put_get_delete_roundtrip() -> Result<(), Error> {
         keys.sort();
         assert_eq!(keys, vec!["a/1.txt", "a/2.txt", "a/3.txt"]);
 
-        let out = client.objects().list_v2(&bucket).delimiter("/")?.send()?;
+        let out = client.objects().list_v2(&bucket).delimiter("/").send()?;
         assert!(out.common_prefixes.iter().any(|p| p == "a/"));
         assert!(out.common_prefixes.iter().any(|p| p == "b/"));
         assert!(out.contents.iter().any(|o| o.key == "root.txt"));
@@ -108,7 +108,7 @@ fn s3_compat_blocking_put_get_delete_roundtrip() -> Result<(), Error> {
         }
 
         let presigned = client.objects().presign_get(&bucket, key).build()?;
-        let mut req = ureq::agent().get(presigned.url.as_str());
+        let mut req = ureq::agent().get(presigned.url.to_string().as_str());
         for (name, value) in presigned.headers.iter() {
             let Ok(value_str) = value.to_str() else {
                 continue;
@@ -538,7 +538,7 @@ fn s3_compat_blocking_presign_put_head_delete_roundtrip() -> Result<(), Error> {
             .metadata("m", "1")?
             .build()?;
 
-        let mut req = ureq::agent().put(presigned_put.url.as_str());
+        let mut req = ureq::agent().put(presigned_put.url.to_string().as_str());
         for (name, value) in presigned_put.headers.iter() {
             let Ok(value_str) = value.to_str() else {
                 continue;
@@ -555,7 +555,7 @@ fn s3_compat_blocking_presign_put_head_delete_roundtrip() -> Result<(), Error> {
         assert_eq!(head.content_type.as_deref(), Some("text/plain"));
 
         let presigned_head = client.objects().presign_head(&bucket, key).build()?;
-        let mut req = ureq::agent().head(presigned_head.url.as_str());
+        let mut req = ureq::agent().head(presigned_head.url.to_string().as_str());
         for (name, value) in presigned_head.headers.iter() {
             let Ok(value_str) = value.to_str() else {
                 continue;
@@ -574,7 +574,7 @@ fn s3_compat_blocking_presign_put_head_delete_roundtrip() -> Result<(), Error> {
         );
 
         let presigned_delete = client.objects().presign_delete(&bucket, key).build()?;
-        let mut req = ureq::agent().delete(presigned_delete.url.as_str());
+        let mut req = ureq::agent().delete(presigned_delete.url.to_string().as_str());
         for (name, value) in presigned_delete.headers.iter() {
             let Ok(value_str) = value.to_str() else {
                 continue;
@@ -768,7 +768,7 @@ fn s3_compat_blocking_multipart_abort_roundtrip() -> Result<(), Error> {
         let listed = client
             .objects()
             .list_multipart_uploads(&bucket)
-            .prefix(key)?
+            .prefix(key)
             .send()?;
         assert!(
             listed
@@ -785,7 +785,7 @@ fn s3_compat_blocking_multipart_abort_roundtrip() -> Result<(), Error> {
         let listed = client
             .objects()
             .list_multipart_uploads(&bucket)
-            .prefix(key)?
+            .prefix(key)
             .send()?;
         assert!(
             listed

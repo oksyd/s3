@@ -24,14 +24,16 @@ pub(crate) fn validate_object_key(key: &str) -> Result<()> {
     if key.is_empty() {
         return Err(Error::invalid_config("object key must not be empty"));
     }
-    if key.bytes().any(|b| b.is_ascii_control()) {
+    Ok(())
+}
+
+pub(crate) fn validate_xml_object_key(key: &str) -> Result<()> {
+    validate_object_key(key)?;
+    if key.chars().any(|c| {
+        matches!(c, '\0'..='\u{8}' | '\u{b}'..='\u{c}' | '\u{e}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}')
+    }) {
         return Err(Error::invalid_config(
-            "object key must not contain ASCII control characters",
-        ));
-    }
-    if key.split('/').any(|segment| matches!(segment, "." | "..")) {
-        return Err(Error::invalid_config(
-            "object key must not contain '.' or '..' path segments",
+            "object key contains characters that XML 1.0 cannot represent",
         ));
     }
     Ok(())
@@ -62,9 +64,9 @@ mod tests {
     fn validates_object_key() {
         validate_object_key("dir/file.txt").unwrap();
         assert!(validate_object_key("").is_err());
-        assert!(validate_object_key("dir/../file.txt").is_err());
-        assert!(validate_object_key("dir/./file.txt").is_err());
-        assert!(validate_object_key("line\nbreak").is_err());
+        validate_object_key("dir/../file.txt").unwrap();
+        validate_object_key("dir/./file.txt").unwrap();
+        validate_object_key("line\nbreak\0").unwrap();
     }
 
     #[test]

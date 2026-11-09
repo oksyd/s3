@@ -148,6 +148,9 @@ mod tests {
     #[test]
     fn copy_source_header_value_rejects_empty_key() {
         assert!(copy_source_header_value("bucket", "", None).is_err());
-        assert!(copy_source_header_value("bucket", "a/../b", None).is_err());
+        assert_eq!(
+            copy_source_header_value("bucket", "a/../b\n\0%+", None).unwrap(),
+            "/bucket/a/../b%0A%00%25%2B"
+        );
     }
 }

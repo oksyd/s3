@@ -118,7 +118,7 @@ let buckets = client.buckets().list().send().await?;
 let objects = client
     .objects()
     .list_v2("my-bucket")
-    .prefix("logs/")?
+    .prefix("logs/")
     .send()
     .await?;
 
@@ -126,6 +126,11 @@ println!("{} buckets, {} objects", buckets.buckets.len(), objects.contents.len()
 # Ok(())
 # }
 ```
+
+Pass object keys, prefixes, and key markers as unencoded strings. Object and multipart
+upload listings request `encoding-type=url` and return decoded keys; the service must
+support this encoding. Multipart pagination uses both `NextKeyMarker` and
+`NextUploadIdMarker` when provided, because multiple uploads can share one key.
 
 ### Presign
 
@@ -147,6 +152,10 @@ println!("GET {}", presigned.url);
 # Ok(())
 # }
 ```
+
+`PresignedRequest::url` is an `http::Uri`, preserving object keys with `.` and `..`
+path segments. Use an HTTP client that preserves this path; converting it to
+`url::Url` can normalize the key and invalidate the signature.
 
 ### Endpoint presets (feature = `providers`)
 

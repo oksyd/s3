@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 use super::*;
+use crate::{Error, util::encode::percent_decode};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct XmlError {
@@ -16,6 +17,8 @@ pub(crate) struct XmlError {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct XmlListBucketResult {
+    #[serde(rename = "EncodingType")]
+    pub(crate) encoding_type: String,
     #[serde(rename = "Name")]
     pub(crate) name: String,
     #[serde(rename = "Prefix")]
@@ -159,6 +162,8 @@ pub(crate) struct XmlPart {
 #[cfg(feature = "multipart")]
 #[derive(Debug, Deserialize)]
 pub(crate) struct XmlListMultipartUploadsResult {
+    #[serde(rename = "EncodingType")]
+    pub(crate) encoding_type: String,
     #[serde(rename = "Bucket")]
     pub(crate) bucket: Option<String>,
     #[serde(rename = "Prefix")]
@@ -347,12 +352,20 @@ pub(crate) struct XmlPublicAccessBlockConfiguration {
     pub(crate) restrict_public_buckets: Option<bool>,
 }
 
-impl From<XmlListBucketResult> for ListObjectsV2Output {
-    fn from(value: XmlListBucketResult) -> Self {
-        Self {
+impl TryFrom<XmlListBucketResult> for ListObjectsV2Output {
+    type Error = crate::Error;
+
+    fn try_from(value: XmlListBucketResult) -> Result<Self> {
+        if value.encoding_type != "url" {
+            return Err(Error::decode(
+                "ListObjectsV2 response must use URL encoding",
+                None,
+            ));
+        }
+        Ok(Self {
             name: value.name,
-            prefix: value.prefix,
-            delimiter: value.delimiter,
+            prefix: value.prefix.as_deref().map(percent_decode).transpose()?,
+            delimiter: value.delimiter.as_deref().map(percent_decode).transpose()?,
             is_truncated: value.is_truncated,
             key_count: value.key_count,
             max_keys: value.max_keys,
@@ -361,20 +374,22 @@ impl From<XmlListBucketResult> for ListObjectsV2Output {
             contents: value
                 .contents
                 .into_iter()
-                .map(|o| Object {
-                    key: o.key,
-                    size: o.size,
-                    etag: o.etag,
-                    last_modified: o.last_modified,
-                    storage_class: o.storage_class,
+                .map(|o| {
+                    Ok(Object {
+                        key: percent_decode(&o.key)?,
+                        size: o.size,
+                        etag: o.etag,
+                        last_modified: o.last_modified,
+                        storage_class: o.storage_class,
+                    })
                 })
-                .collect(),
+                .collect::<Result<_>>()?,
             common_prefixes: value
                 .common_prefixes
                 .into_iter()
-                .map(|p| p.prefix)
-                .collect(),
-        }
+                .map(|p| percent_decode(&p.prefix))
+                .collect::<Result<_>>()?,
+        })
     }
 }
 
@@ -485,27 +500,45 @@ impl From<XmlListPartsResult> for ListPartsOutput {
 }
 
 #[cfg(feature = "multipart")]
-impl From<XmlListMultipartUploadsResult> for ListMultipartUploadsOutput {
-    fn from(value: XmlListMultipartUploadsResult) -> Self {
-        Self {
+impl TryFrom<XmlListMultipartUploadsResult> for ListMultipartUploadsOutput {
+    type Error = crate::Error;
+
+    fn try_from(value: XmlListMultipartUploadsResult) -> Result<Self> {
+        if value.encoding_type != "url" {
+            return Err(Error::decode(
+                "ListMultipartUploads response must use URL encoding",
+                None,
+            ));
+        }
+        Ok(Self {
             bucket: value.bucket,
-            prefix: value.prefix,
-            key_marker: value.key_marker,
+            prefix: value.prefix.as_deref().map(percent_decode).transpose()?,
+            key_marker: value
+                .key_marker
+                .as_deref()
+                .map(percent_decode)
+                .transpose()?,
             upload_id_marker: value.upload_id_marker,
-            next_key_marker: value.next_key_marker,
+            next_key_marker: value
+                .next_key_marker
+                .as_deref()
+                .map(percent_decode)
+                .transpose()?,
             next_upload_id_marker: value.next_upload_id_marker,
             max_uploads: value.max_uploads,
             is_truncated: value.is_truncated,
             uploads: value
                 .uploads
                 .into_iter()
-                .map(|u| MultipartUpload {
-                    key: u.key,
-                    upload_id: u.upload_id,
-                    initiated: u.initiated,
+                .map(|u| {
+                    Ok(MultipartUpload {
+                        key: percent_decode(&u.key)?,
+                        upload_id: u.upload_id,
+                        initiated: u.initiated,
+                    })
                 })
-                .collect(),
-        }
+                .collect::<Result<_>>()?,
+        })
     }
 }
 

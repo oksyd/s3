@@ -1,7 +1,7 @@
 use std::{borrow::Cow, sync::Arc, time::Duration};
 
 use crate::TlsRootStore;
-use http::{HeaderMap, Method};
+use http::{HeaderMap, Method, Uri};
 use time::OffsetDateTime;
 use url::Url;
 
@@ -128,8 +128,8 @@ impl BlockingClient {
         query_params: &[(String, String)],
         headers: &mut HeaderMap,
         body: &BlockingBody,
-    ) -> Result<Url> {
-        let resolved = util::url::resolve_url(
+    ) -> Result<Uri> {
+        let resolved = util::url::resolve_uri(
             &self.inner.endpoint,
             bucket,
             key,
@@ -156,7 +156,7 @@ impl BlockingClient {
             )?;
         }
 
-        Ok(resolved.url)
+        Ok(resolved)
     }
 
     pub(crate) fn presign(
@@ -174,7 +174,7 @@ impl BlockingClient {
             .credentials_snapshot_blocking()?
             .ok_or_else(|| Error::invalid_config("presign requires credentials"))?;
 
-        let resolved = util::url::resolve_url(
+        let resolved = util::url::resolve_uri(
             &self.inner.endpoint,
             Some(bucket),
             Some(key),

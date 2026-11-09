@@ -1,12 +1,11 @@
 use graviola::hashing::{Hash as _, HashOutput, Sha256, hmac::Hmac};
-use http::{HeaderMap, HeaderName, HeaderValue, Method};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
 use time::OffsetDateTime;
 
 use crate::{
     auth::{Credentials, Region},
     error::Error,
     types::PresignedRequest,
-    util::url::ResolvedUrl,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -50,22 +49,22 @@ impl<'a> SigV4Params<'a> {
 
 pub(crate) fn sign_headers(
     method: &Method,
-    resolved: &ResolvedUrl,
+    resolved: &Uri,
     headers: &mut HeaderMap,
     payload_hash: &str,
     params: SigV4Params<'_>,
 ) -> Result<(), Error> {
     set_amz_headers(headers, payload_hash, params.credentials, params.now)?;
 
-    let host_header_value = host_header_value(&resolved.url)?;
+    let host_header_value = host_header_value(resolved)?;
     headers.insert(http::header::HOST, host_header_value);
 
     let (canonical_headers, signed_headers) = canonicalize_headers(headers)?;
 
     let canonical_request = canonical_request(
         method,
-        &resolved.canonical_uri,
-        &resolved.canonical_query_string,
+        resolved.path(),
+        resolved.query().unwrap_or_default(),
         &canonical_headers,
         &signed_headers,
         payload_hash,
@@ -103,18 +102,17 @@ pub(crate) fn sign_headers(
 
 pub(crate) fn presign(
     method: Method,
-    resolved: ResolvedUrl,
+    resolved: Uri,
     params: SigV4Params<'_>,
     expires_in: std::time::Duration,
     mut query_params: Vec<(String, String)>,
     mut headers: HeaderMap,
 ) -> Result<PresignedRequest, Error> {
-    let mut resolved = resolved;
     let expires = validate_presign_expires(expires_in)?;
     validate_existing_presign_query_params(&query_params)?;
     validate_presign_headers(&headers)?;
 
-    headers.insert(http::header::HOST, host_header_value(&resolved.url)?);
+    headers.insert(http::header::HOST, host_header_value(&resolved)?);
     let (canonical_headers, signed_headers) = canonicalize_headers(&headers)?;
     headers.remove(http::header::HOST);
 
@@ -140,11 +138,11 @@ pub(crate) fn presign(
         query_params.push(("X-Amz-Security-Token".to_string(), token.to_string()));
     }
 
-    resolved.canonical_query_string = crate::util::encode::canonical_query_string(&query_params);
+    let canonical_query = crate::util::encode::canonical_query_string(&query_params);
     let canonical_request = canonical_request(
         &method,
-        &resolved.canonical_uri,
-        &resolved.canonical_query_string,
+        resolved.path(),
+        &canonical_query,
         &canonical_headers,
         &signed_headers,
         UNSIGNED_PAYLOAD,
@@ -166,11 +164,17 @@ pub(crate) fn presign(
 
     query_params.push(("X-Amz-Signature".to_string(), sig));
     let final_query = crate::util::encode::canonical_query_string(&query_params);
-    resolved.url.set_query(Some(&final_query));
+    let path_and_query = format!("{}?{final_query}", resolved.path())
+        .parse()
+        .map_err(|_| Error::signing("invalid presigned request path"))?;
+    let mut parts = resolved.into_parts();
+    parts.path_and_query = Some(path_and_query);
+    let url =
+        Uri::from_parts(parts).map_err(|_| Error::signing("invalid presigned request URI"))?;
 
     Ok(PresignedRequest {
         method,
-        url: resolved.url,
+        url,
         headers,
     })
 }
@@ -306,22 +310,12 @@ fn set_amz_headers(
     Ok(())
 }
 
-fn host_header_value(url: &url::Url) -> Result<HeaderValue, Error> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| Error::invalid_config("endpoint must include host"))?;
-    let default_port = match url.scheme() {
-        "http" => Some(80),
-        "https" => Some(443),
-        _ => None,
-    };
-    let host = match (url.port(), default_port) {
-        (Some(port), Some(default)) if port != default => format!("{host}:{port}"),
-        (Some(port), None) => format!("{host}:{port}"),
-        _ => host.to_string(),
-    };
-
-    HeaderValue::from_str(&host).map_err(|_| Error::signing("invalid host header value"))
+fn host_header_value(uri: &Uri) -> Result<HeaderValue, Error> {
+    let authority = uri
+        .authority()
+        .ok_or_else(|| Error::invalid_config("request URI must include host"))?;
+    HeaderValue::from_str(authority.as_str())
+        .map_err(|_| Error::signing("invalid host header value"))
 }
 
 fn canonicalize_headers(headers: &HeaderMap) -> Result<(String, String), Error> {
@@ -481,7 +475,7 @@ mod tests {
         )
         .unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
-        let resolved = s3_url::resolve_url(
+        let resolved = s3_url::resolve_uri(
             &endpoint,
             Some("examplebucket"),
             Some("test.txt"),
@@ -519,9 +513,7 @@ mod tests {
             HeaderMap::new(),
         )
         .unwrap();
-        let (_, signature) = presigned
-            .url
-            .query_pairs()
+        let (_, signature) = url::form_urlencoded::parse(presigned.url.query().unwrap().as_bytes())
             .find(|(name, _)| name == "X-Amz-Signature")
             .unwrap();
         assert_eq!(
@@ -538,7 +530,7 @@ mod tests {
             Credentials::new("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY").unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
 
-        let resolved = s3_url::resolve_url(
+        let resolved = s3_url::resolve_uri(
             &endpoint,
             Some("my-bucket"),
             Some("a+b"),
@@ -587,7 +579,7 @@ mod tests {
         let creds =
             Credentials::new("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY").unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
-        let resolved = s3_url::resolve_url(
+        let resolved = s3_url::resolve_uri(
             &endpoint,
             Some("my-bucket"),
             Some("a+b"),
@@ -635,7 +627,7 @@ mod tests {
         let region = Region::new("us-east-1").unwrap();
         let creds = Credentials::new("AKIDEXAMPLE", "SECRET").unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
-        let resolved = s3_url::resolve_url(
+        let resolved = s3_url::resolve_uri(
             &endpoint,
             Some("my-bucket"),
             Some("a+b"),
@@ -663,6 +655,46 @@ mod tests {
     }
 
     #[test]
+    fn presigning_preserves_the_signed_object_path() {
+        let endpoint = url::Url::parse("https://example.com:9443").unwrap();
+        let region = Region::new("us-east-1").unwrap();
+        let credentials = Credentials::new("AKIDEXAMPLE", "SECRET").unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
+        let params = SigV4Params::for_s3(&region, &credentials, now);
+        let mut signatures = Vec::new();
+        for key in ["dir/../file", "file"] {
+            let uri = s3_url::resolve_uri(
+                &endpoint,
+                Some("bucket"),
+                Some(key),
+                &[],
+                AddressingStyle::Path,
+            )
+            .unwrap();
+            let request = presign(
+                Method::GET,
+                uri,
+                params,
+                Duration::from_secs(60),
+                Vec::new(),
+                HeaderMap::new(),
+            )
+            .unwrap();
+            assert_eq!(request.url.path(), format!("/bucket/{key}"));
+            assert_eq!(
+                request.url.authority().unwrap().as_str(),
+                "example.com:9443"
+            );
+            let (_, signature) =
+                url::form_urlencoded::parse(request.url.query().unwrap().as_bytes())
+                    .find(|(name, _)| name == "X-Amz-Signature")
+                    .unwrap();
+            signatures.push(signature.into_owned());
+        }
+        assert_ne!(signatures[0], signatures[1]);
+    }
+
+    #[test]
     fn presign_includes_expected_query_params() {
         let endpoint = url::Url::parse("https://example.com").unwrap();
         let region = Region::new("us-east-1").unwrap();
@@ -670,7 +702,7 @@ mod tests {
             Credentials::new("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY").unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
 
-        let resolved = s3_url::resolve_url(
+        let resolved = s3_url::resolve_uri(
             &endpoint,
             Some("my-bucket"),
             Some("a+b"),
@@ -689,7 +721,7 @@ mod tests {
         )
         .unwrap();
 
-        let s = presigned.url.as_str();
+        let s = presigned.url.to_string();
         assert!(s.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
         assert!(
             s.contains("X-Amz-Credential=AKIDEXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request")
@@ -708,7 +740,7 @@ mod tests {
             Credentials::new("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY").unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
 
-        let resolved = s3_url::resolve_url(
+        let resolved = s3_url::resolve_uri(
             &endpoint,
             Some("my-bucket"),
             Some("a+b"),
@@ -738,7 +770,7 @@ mod tests {
         )
         .unwrap();
 
-        let s = presigned.url.as_str();
+        let s = presigned.url.to_string();
         assert!(s.contains("X-Amz-SignedHeaders=content-type%3Bhost"));
         assert_eq!(presigned.headers, expected_headers);
         assert_eq!(
@@ -773,7 +805,7 @@ mod tests {
         let creds =
             Credentials::new("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY").unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
-        let resolved = s3_url::resolve_url(
+        let resolved = s3_url::resolve_uri(
             &endpoint,
             Some("my-bucket"),
             Some("a+b"),
@@ -807,7 +839,7 @@ mod tests {
         let creds =
             Credentials::new("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY").unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
-        let resolved = s3_url::resolve_url(
+        let resolved = s3_url::resolve_uri(
             &endpoint,
             Some("my-bucket"),
             Some("a+b"),
@@ -844,7 +876,7 @@ mod tests {
         let creds =
             Credentials::new("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY").unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
-        let resolved = s3_url::resolve_url(
+        let resolved = s3_url::resolve_uri(
             &endpoint,
             Some("my-bucket"),
             Some("a+b"),
@@ -881,7 +913,7 @@ mod tests {
         let creds =
             Credentials::new("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY").unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
-        let resolved = s3_url::resolve_url(
+        let resolved = s3_url::resolve_uri(
             &endpoint,
             Some("my-bucket"),
             Some("a+b"),
@@ -926,7 +958,7 @@ mod tests {
             http::header::HeaderName::from_static("x-amz-content-sha256"),
             http::header::HeaderName::from_static("x-amz-security-token"),
         ] {
-            let resolved = s3_url::resolve_url(
+            let resolved = s3_url::resolve_uri(
                 &endpoint,
                 Some("my-bucket"),
                 Some("a+b"),
@@ -963,7 +995,7 @@ mod tests {
         let creds =
             Credentials::new("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY").unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap();
-        let resolved = s3_url::resolve_url(
+        let resolved = s3_url::resolve_uri(
             &endpoint,
             Some("my-bucket"),
             Some("a+b"),

@@ -13,7 +13,7 @@ use super::common::{
     ByteRange, ObjectConditions, apply_copy_metadata_headers, apply_metadata_headers,
     insert_header, insert_validated_header, next_list_v2_continuation_token, parse_xml_response,
     push_delete_object, push_metadata, validate_content_length_matches_body, validate_max_keys,
-    validate_query_token, validate_query_value, validated_header_value, xml_body_headers,
+    validate_query_token, validated_header_value, xml_body_headers,
 };
 #[cfg(feature = "multipart")]
 use super::common::{
@@ -1235,6 +1235,9 @@ impl ListPartsRequest {
 
 #[cfg(feature = "multipart")]
 /// Request builder for listing in-progress multipart uploads.
+///
+/// Requests URL-encoded keys and returns decoded keys and markers. The service must
+/// support the `encoding-type=url` parameter.
 pub struct ListMultipartUploadsRequest {
     client: Client,
     bucket: String,
@@ -1246,23 +1249,21 @@ pub struct ListMultipartUploadsRequest {
 
 #[cfg(feature = "multipart")]
 impl ListMultipartUploadsRequest {
-    /// Filters by key prefix.
-    pub fn prefix(mut self, value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        validate_query_value("prefix", &value)?;
-        self.prefix = Some(value);
-        Ok(self)
+    /// Filters by an unencoded key prefix. An empty prefix matches all keys.
+    pub fn prefix(mut self, value: impl Into<String>) -> Self {
+        self.prefix = Some(value.into());
+        self
     }
 
     /// Sets the key marker for pagination.
-    pub fn key_marker(mut self, value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        validate_query_value("key_marker", &value)?;
-        self.key_marker = Some(value);
-        Ok(self)
+    ///
+    /// Also set the previous page's upload id marker to resume within the same key.
+    pub fn key_marker(mut self, value: impl Into<String>) -> Self {
+        self.key_marker = Some(value.into());
+        self
     }
 
-    /// Sets the upload id marker for pagination.
+    /// Sets the upload id marker for pagination. Requires a nonempty key marker.
     pub fn upload_id_marker(mut self, value: impl Into<String>) -> Result<Self> {
         let value = value.into();
         validate_query_token("upload_id_marker", &value)?;
@@ -1279,7 +1280,16 @@ impl ListMultipartUploadsRequest {
 
     /// Sends the request.
     pub async fn send(self) -> Result<ListMultipartUploadsOutput> {
-        let mut query = vec![("uploads".to_string(), String::new())];
+        if self.upload_id_marker.is_some() && self.key_marker.as_deref().is_none_or(str::is_empty) {
+            return Err(Error::invalid_config(
+                "upload_id_marker requires a nonempty key_marker",
+            ));
+        }
+
+        let mut query = vec![
+            ("uploads".to_string(), String::new()),
+            ("encoding-type".to_string(), "url".to_string()),
+        ];
         if let Some(v) = self.prefix {
             query.push(("prefix".to_string(), v));
         }
@@ -1311,6 +1321,9 @@ impl ListMultipartUploadsRequest {
 
 /// Request builder for ListObjectsV2.
 ///
+/// Requests URL-encoded keys and returns decoded keys and prefixes. The service must
+/// support the `encoding-type=url` parameter.
+///
 /// Created by [`ObjectsService::list_v2`](crate::api::ObjectsService::list_v2).
 ///
 /// # Example
@@ -1327,7 +1340,7 @@ impl ListMultipartUploadsRequest {
 /// let page = client
 ///     .objects()
 ///     .list_v2("my-bucket")
-///     .prefix("logs/")?
+///     .prefix("logs/")
 ///     .max_keys(100)?
 ///     .send()
 ///     .await?;
@@ -1347,20 +1360,16 @@ pub struct ListObjectsV2Request {
 }
 
 impl ListObjectsV2Request {
-    /// Filters by key prefix.
-    pub fn prefix(mut self, value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        validate_query_value("prefix", &value)?;
-        self.prefix = Some(value);
-        Ok(self)
+    /// Filters by an unencoded key prefix. An empty prefix matches all keys.
+    pub fn prefix(mut self, value: impl Into<String>) -> Self {
+        self.prefix = Some(value.into());
+        self
     }
 
     /// Groups keys by delimiter.
-    pub fn delimiter(mut self, value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        validate_query_value("delimiter", &value)?;
-        self.delimiter = Some(value);
-        Ok(self)
+    pub fn delimiter(mut self, value: impl Into<String>) -> Self {
+        self.delimiter = Some(value.into());
+        self
     }
 
     /// Sets the continuation token for pagination.
@@ -1372,11 +1381,9 @@ impl ListObjectsV2Request {
     }
 
     /// Starts listing after the given key.
-    pub fn start_after(mut self, value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        crate::util::validation::validate_object_key(&value)?;
-        self.start_after = Some(value);
-        Ok(self)
+    pub fn start_after(mut self, value: impl Into<String>) -> Self {
+        self.start_after = Some(value.into());
+        self
     }
 
     /// Sets the maximum number of keys to return.
@@ -1396,8 +1403,10 @@ impl ListObjectsV2Request {
 
     /// Sends the request.
     pub async fn send(self) -> Result<ListObjectsV2Output> {
-        let mut query = Vec::new();
-        query.push(("list-type".to_string(), "2".to_string()));
+        let mut query = vec![
+            ("list-type".to_string(), "2".to_string()),
+            ("encoding-type".to_string(), "url".to_string()),
+        ];
         if let Some(v) = self.prefix {
             query.push(("prefix".to_string(), v));
         }
@@ -1608,18 +1617,25 @@ mod tests {
     }
 
     #[test]
+    fn listing_parameters_accept_raw_keys_and_empty_filters() {
+        let objects = test_client().objects();
+        let request = objects
+            .list_v2("bucket")
+            .prefix("")
+            .delimiter("\n")
+            .start_after("a/../\0%+");
+        assert_eq!(request.prefix.as_deref(), Some(""));
+        assert_eq!(request.delimiter.as_deref(), Some("\n"));
+        assert_eq!(request.start_after.as_deref(), Some("a/../\0%+"));
+    }
+
+    #[test]
     fn list_v2_setters_reject_invalid_values() {
         let objects = test_client().objects();
 
-        assert_invalid_config(objects.list_v2("bucket").prefix(""), "prefix");
-        assert_invalid_config(objects.list_v2("bucket").delimiter(""), "delimiter");
         assert_invalid_config(
             objects.list_v2("bucket").continuation_token(" token"),
             "continuation_token",
-        );
-        assert_invalid_config(
-            objects.list_v2("bucket").start_after("a/../b"),
-            "object key",
         );
         assert_invalid_config(objects.list_v2("bucket").max_keys(0), "max_keys");
     }
@@ -1839,6 +1855,17 @@ mod tests {
     }
 
     #[cfg(feature = "multipart")]
+    #[tokio::test]
+    async fn multipart_upload_id_marker_requires_key_marker() {
+        let request = test_client()
+            .objects()
+            .list_multipart_uploads("bucket")
+            .upload_id_marker("id")
+            .unwrap();
+        assert_invalid_config(request.send().await, "requires a nonempty key_marker");
+    }
+
+    #[cfg(feature = "multipart")]
     #[test]
     fn list_multipart_uploads_setters_reject_invalid_values() {
         let objects = test_client().objects();
@@ -1853,10 +1880,18 @@ mod tests {
                 .upload_id_marker(""),
             "upload_id_marker",
         );
-        assert_invalid_config(
-            objects.list_multipart_uploads("bucket").prefix(""),
-            "prefix",
-        );
+    }
+
+    #[cfg(feature = "multipart")]
+    #[test]
+    fn list_multipart_uploads_accepts_control_characters_in_key_parameters() {
+        let request = test_client()
+            .objects()
+            .list_multipart_uploads("bucket")
+            .prefix("a\0")
+            .key_marker("key\n +%");
+        assert_eq!(request.prefix.as_deref(), Some("a\0"));
+        assert_eq!(request.key_marker.as_deref(), Some("key\n +%"));
     }
 
     #[test]
