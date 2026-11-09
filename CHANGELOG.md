@@ -1,3 +1,8 @@
+## [0.1.40] - 2026-11-09
+
+### 🐛 Bug Fixes
+
+- *(ci)* Replace unavailable MinIO image with pinned Bitnami image
 ## [0.1.39] - 2026-11-09
 
 ### 🚀 Features
@@ -7,6 +12,10 @@
 ### 🐛 Bug Fixes
 
 - Preserve S3 object keys across requests and listings
+
+### ⚙️ Miscellaneous Tasks
+
+- Release s3 version 0.1.39
 ## [0.1.38] - 2026-10-20
 
 ### 🚜 Refactor
