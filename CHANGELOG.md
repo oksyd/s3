@@ -1,3 +1,12 @@
+## [0.1.39] - 2026-11-09
+
+### 🚀 Features
+
+- *(objects)* Add ListMultipartUploads
+
+### 🐛 Bug Fixes
+
+- Preserve S3 object keys across requests and listings
 ## [0.1.38] - 2026-10-20
 
 ### 🚜 Refactor
@@ -7,6 +16,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - *(ci)* Update
+- Release s3 version 0.1.38
 ## [0.1.37] - 2026-09-24
 
 ### 🐛 Bug Fixes
