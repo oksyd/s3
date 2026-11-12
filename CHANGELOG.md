@@ -1,8 +1,21 @@
+## [0.2.0] - 2026-11-12
+
+### 🚜 Refactor
+
+- [**breaking**] Isolate transport features and unify TLS configuration
+
+### ⚙️ Miscellaneous Tasks
+
+- *(docs)* Update
 ## [0.1.40] - 2026-11-09
 
 ### 🐛 Bug Fixes
 
 - *(ci)* Replace unavailable MinIO image with pinned Bitnami image
+
+### ⚙️ Miscellaneous Tasks
+
+- Release s3 version 0.1.40
 ## [0.1.39] - 2026-11-09
 
 ### 🚀 Features
