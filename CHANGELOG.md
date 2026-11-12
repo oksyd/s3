@@ -7,6 +7,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - *(docs)* Update
+- Release s3 version 0.2.0
 ## [0.1.40] - 2026-11-09
 
 ### 🐛 Bug Fixes
