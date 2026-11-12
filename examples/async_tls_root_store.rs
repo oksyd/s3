@@ -1,10 +1,10 @@
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 use std::env;
 
-#[cfg(feature = "async")]
-use s3::{Auth, Client, TlsRootStore};
+#[cfg(feature = "_async")]
+use s3::{Auth, Client, TlsConfig, TlsRootStore};
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 fn tls_root_store_from_env() -> TlsRootStore {
     match env::var("S3_TLS_ROOT_STORE")
         .unwrap_or_default()
@@ -17,7 +17,7 @@ fn tls_root_store_from_env() -> TlsRootStore {
     }
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 #[tokio::main]
 async fn main() -> Result<(), s3::Error> {
     let endpoint = match env::var("S3_TEST_ENDPOINT") {
@@ -44,7 +44,10 @@ async fn main() -> Result<(), s3::Error> {
     let client = Client::builder(&endpoint)?
         .region(region)
         .auth(auth)
-        .tls_root_store(tls_root_store)
+        .tls(TlsConfig {
+            root_store: tls_root_store,
+            ..TlsConfig::default()
+        })
         .build()?;
 
     let buckets = client.buckets().list().send().await?;
@@ -55,7 +58,7 @@ async fn main() -> Result<(), s3::Error> {
     Ok(())
 }
 
-#[cfg(not(feature = "async"))]
+#[cfg(not(feature = "_async"))]
 fn main() {
-    eprintln!("This example requires the `async` feature (enabled by default).");
+    eprintln!("This example requires an async client/TLS feature (enabled by default).");
 }

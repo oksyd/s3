@@ -1,10 +1,10 @@
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 use std::env;
 
-#[cfg(feature = "blocking")]
-use s3::{Auth, BlockingClient, TlsRootStore};
+#[cfg(feature = "_blocking")]
+use s3::{Auth, BlockingClient, TlsConfig, TlsRootStore};
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 fn tls_root_store_from_env() -> TlsRootStore {
     match env::var("S3_TLS_ROOT_STORE")
         .unwrap_or_default()
@@ -17,7 +17,7 @@ fn tls_root_store_from_env() -> TlsRootStore {
     }
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 fn main() -> Result<(), s3::Error> {
     let endpoint = match env::var("S3_TEST_ENDPOINT") {
         Ok(v) => v,
@@ -43,7 +43,10 @@ fn main() -> Result<(), s3::Error> {
     let client = BlockingClient::builder(&endpoint)?
         .region(region)
         .auth(auth)
-        .tls_root_store(tls_root_store)
+        .tls(TlsConfig {
+            root_store: tls_root_store,
+            ..TlsConfig::default()
+        })
         .build()?;
 
     let buckets = client.buckets().list().send()?;
@@ -54,10 +57,10 @@ fn main() -> Result<(), s3::Error> {
     Ok(())
 }
 
-#[cfg(not(feature = "blocking"))]
+#[cfg(not(feature = "_blocking"))]
 fn main() {
-    eprintln!("This example requires the `blocking` feature.");
+    eprintln!("This example requires a blocking client/TLS feature.");
     eprintln!(
-        "Try: cargo run --example blocking_tls_root_store --no-default-features --features blocking,rustls"
+        "Try: cargo run --example blocking_tls_root_store --no-default-features --features blocking-tls-rustls-ring"
     );
 }

@@ -53,7 +53,22 @@ jobs:
             cargo-${{ runner.os }}-
       - run: cargo check --lib --no-default-features
       - run: cargo test --lib --no-default-features
-      - run: cargo test --lib --no-default-features --features providers
+      - name: Check client dependency isolation
+        run: |
+          for backend in rustls-ring rustls-graviola native; do
+            for mode in async blocking; do
+              feature="$mode-tls-$backend"
+              dependencies=$(cargo tree --no-default-features --features "$feature" --edges normal,build --prefix none --format '{p}')
+              case "$mode" in
+                async) forbidden=ureq ;;
+                blocking) forbidden='hyper|tokio' ;;
+              esac
+              if grep -E "^($forbidden) " <<< "$dependencies"; then
+                echo "::error::Unexpected dependency for $feature"
+                exit 1
+              fi
+            done
+          done
 
   clippy:
     runs-on: ubuntu-26.04
@@ -63,24 +78,50 @@ jobs:
         include:
           - name: default
             args: ""
-          - name: blocking-rustls
-            args: "--no-default-features --features blocking,rustls"
+          - name: blocking-tls-rustls-ring
+            args: "--no-default-features --features blocking-tls-rustls-ring"
           - name: async-all
             args: >-
               --no-default-features
-              --features async,rustls,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+              --features async-tls-rustls-ring,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
           - name: blocking-all
             args: >-
               --no-default-features
-              --features blocking,rustls,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+              --features blocking-tls-rustls-ring,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
           - name: async-all-native-tls
             args: >-
               --no-default-features
-              --features async,native-tls,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+              --features async-tls-native,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
           - name: blocking-all-native-tls
             args: >-
               --no-default-features
-              --features blocking,native-tls,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+              --features blocking-tls-native,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+          - name: async-tls-rustls-ring-blocking-tls-native
+            args: >-
+              --no-default-features
+              --features async-tls-rustls-ring,blocking-tls-native,credentials-imds,credentials-sts
+          - name: async-tls-native-blocking-tls-rustls-ring
+            args: >-
+              --no-default-features
+              --features async-tls-native,blocking-tls-rustls-ring,credentials-imds,credentials-sts
+          - name: async-all-graviola
+            args: >-
+              --no-default-features
+              --features async-tls-rustls-graviola,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+          - name: blocking-all-graviola
+            args: >-
+              --no-default-features
+              --features blocking-tls-rustls-graviola,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+          - name: async-graviola-blocking-ring
+            args: >-
+              --no-default-features
+              --features async-tls-rustls-graviola,blocking-tls-rustls-ring,credentials-imds,credentials-sts
+          - name: async-ring-blocking-graviola
+            args: >-
+              --no-default-features
+              --features async-tls-rustls-ring,blocking-tls-rustls-graviola,credentials-imds,credentials-sts
+          - name: all-features
+            args: "--all-features"
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Install Rust toolchain
@@ -95,7 +136,7 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
       - name: Install OpenSSL (native-tls)
-        if: contains(matrix.name, 'native-tls')
+        if: contains(matrix.args, 'tls-native') || matrix.args == '--all-features'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
       - run: cargo clippy --all-targets ${{ matrix.args }} -- -D warnings
 
@@ -107,24 +148,50 @@ jobs:
         include:
           - name: default
             args: ""
-          - name: blocking-rustls
-            args: "--no-default-features --features blocking,rustls"
+          - name: blocking-tls-rustls-ring
+            args: "--no-default-features --features blocking-tls-rustls-ring"
           - name: async-all
             args: >-
               --no-default-features
-              --features async,rustls,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+              --features async-tls-rustls-ring,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
           - name: blocking-all
             args: >-
               --no-default-features
-              --features blocking,rustls,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+              --features blocking-tls-rustls-ring,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
           - name: async-all-native-tls
             args: >-
               --no-default-features
-              --features async,native-tls,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+              --features async-tls-native,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
           - name: blocking-all-native-tls
             args: >-
               --no-default-features
-              --features blocking,native-tls,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+              --features blocking-tls-native,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+          - name: async-tls-rustls-ring-blocking-tls-native
+            args: >-
+              --no-default-features
+              --features async-tls-rustls-ring,blocking-tls-native,credentials-imds,credentials-sts
+          - name: async-tls-native-blocking-tls-rustls-ring
+            args: >-
+              --no-default-features
+              --features async-tls-native,blocking-tls-rustls-ring,credentials-imds,credentials-sts
+          - name: async-all-graviola
+            args: >-
+              --no-default-features
+              --features async-tls-rustls-graviola,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+          - name: blocking-all-graviola
+            args: >-
+              --no-default-features
+              --features blocking-tls-rustls-graviola,multipart,checksums,credentials-profile,credentials-imds,credentials-sts,tracing,metrics
+          - name: async-graviola-blocking-ring
+            args: >-
+              --no-default-features
+              --features async-tls-rustls-graviola,blocking-tls-rustls-ring,credentials-imds,credentials-sts
+          - name: async-ring-blocking-graviola
+            args: >-
+              --no-default-features
+              --features async-tls-rustls-ring,blocking-tls-rustls-graviola,credentials-imds,credentials-sts
+          - name: all-features
+            args: "--all-features"
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Install Rust toolchain
@@ -139,7 +206,7 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
       - name: Install OpenSSL (native-tls)
-        if: contains(matrix.name, 'native-tls')
+        if: contains(matrix.args, 'tls-native') || matrix.args == '--all-features'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
       - run: cargo test ${{ matrix.args }}
 
@@ -196,11 +263,11 @@ jobs:
       - name: Async integration
         run: cargo test --test s3_compat_async --features multipart
       - name: Async integration (native-tls)
-        run: cargo test --test s3_compat_async --no-default-features --features async,native-tls,multipart
+        run: cargo test --test s3_compat_async --no-default-features --features async-tls-native,multipart
       - name: Blocking integration
-        run: cargo test --test s3_compat_blocking --no-default-features --features blocking,rustls,multipart
+        run: cargo test --test s3_compat_blocking --no-default-features --features blocking-tls-rustls-ring,multipart
       - name: Blocking integration (native-tls)
-        run: cargo test --test s3_compat_blocking --no-default-features --features blocking,native-tls,multipart
+        run: cargo test --test s3_compat_blocking --no-default-features --features blocking-tls-native,multipart
       - name: Stop MinIO
         if: always()
         run: docker rm -fv minio || true
@@ -255,11 +322,11 @@ jobs:
       - name: Async integration
         run: cargo test --test s3_compat_async --features multipart
       - name: Async integration (native-tls)
-        run: cargo test --test s3_compat_async --no-default-features --features async,native-tls,multipart
+        run: cargo test --test s3_compat_async --no-default-features --features async-tls-native,multipart
       - name: Blocking integration
-        run: cargo test --test s3_compat_blocking --no-default-features --features blocking,rustls,multipart
+        run: cargo test --test s3_compat_blocking --no-default-features --features blocking-tls-rustls-ring,multipart
       - name: Blocking integration (native-tls)
-        run: cargo test --test s3_compat_blocking --no-default-features --features blocking,native-tls,multipart
+        run: cargo test --test s3_compat_blocking --no-default-features --features blocking-tls-native,multipart
       - name: Stop RustFS
         if: always()
         run: |

@@ -1,53 +1,108 @@
 # Examples
 
-All examples are runnable and meant to be read as usage docs.
-They follow the same layers as the crate docs:
+Run commands from the repository root. The examples below use rustls with ring;
+async is enabled by default, while blocking commands select their feature explicitly.
 
-- choose `Auth`
-- build a `Client` or `BlockingClient`
-- call `objects()` or `buckets()`
-- work with public `s3::types` outputs
+## Setup
 
-## Local / S3-compatible endpoint
+Configure your service and an existing bucket:
 
-Most async examples support:
+```sh
+export S3_TEST_ENDPOINT="http://127.0.0.1:9000"
+export S3_TEST_REGION="us-east-1"
+export S3_TEST_BUCKET="my-bucket"
+export AWS_ACCESS_KEY_ID="<access-key-id>"
+export AWS_SECRET_ACCESS_KEY="<secret-access-key>"
+```
 
-- `S3_TEST_ENDPOINT` (e.g. `http://127.0.0.1:9000`)
-- `S3_TEST_REGION` (default: `us-east-1`)
-- `S3_TEST_BUCKET` (required for object ops)
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
-- `S3_TLS_ROOT_STORE` (optional: `backend-default` / `webpki` / `system`)
-- `S3_CREDENTIALS_TLS_ROOT_STORE` (optional, IMDS/STS examples only: `backend-default` / `webpki` / `system`)
+Replace these values with your configuration. Use a service endpoint without the
+bucket name. Temporary credentials also require `AWS_SESSION_TOKEN`.
+Bucket-listing examples do not need `S3_TEST_BUCKET`.
 
-The web identity example also requires `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, and
-`AWS_REGION` or `AWS_DEFAULT_REGION`. STS always uses regional endpoints. The IMDS example
-requires IMDSv2 when container credentials are not configured.
+## Objects and buckets
 
-## Index
+Choose an operation:
 
-### Core object and bucket flows
+```sh
+# Async
+cargo run --example async_list_buckets
+cargo run --example async_list_objects
+cargo run --example async_put_get_delete
+cargo run --example async_put_stream
+cargo run --example async_copy_object
+cargo run --example async_delete_objects_batch
+cargo run --example async_multipart_upload --features multipart
 
-- `async_put_get_delete.rs`: basic put/get/head/delete
-- `async_put_stream.rs`: streaming upload (requires `Content-Length`)
-- `async_list_buckets.rs`: list buckets
-- `async_list_objects.rs`: list objects v2 + pagination
-- `async_delete_objects_batch.rs`: batch delete (Content-MD5 included)
-- `async_copy_object.rs`: copy object + replace metadata
-- `async_multipart_upload.rs`: multipart upload (`--features multipart`)
+# Blocking
+cargo run --example blocking_list_buckets --no-default-features --features blocking-tls-rustls-ring
+cargo run --example blocking_put_get_delete --no-default-features --features blocking-tls-rustls-ring
+```
 
-### Auth, presign, and endpoint presets
+## Presigned URLs
 
-- `presign_get.rs`: presign with static credentials
-- `async_presign_build_async.rs`: presign with a credentials provider (`build_async`)
-- `async_auth_imds.rs`: IMDS credentials (`--features credentials-imds`)
-- `async_auth_web_identity.rs`: web identity credentials (`--features credentials-sts`)
-- `minio_local_put_get_delete.rs`: `providers::minio_local()` preset (`--features providers`)
-- `r2_put_get_delete.rs`: Cloudflare R2 preset (`--features providers`); optional `R2_JURISDICTION` (for example `eu`, `fedramp`) for jurisdiction-restricted buckets
+These examples generate URLs locally with embedded dummy credentials. No setup or
+service connection is required.
 
-### TLS and blocking flows
+```sh
+cargo run --example presign_get
+cargo run --example async_presign_build_async
+cargo run --example blocking_presign_get --no-default-features --features blocking-tls-rustls-ring
+```
 
-- `async_tls_root_store.rs`: async request TLS root policy (`S3_TLS_ROOT_STORE`)
-- `blocking_put_get_delete.rs`: blocking put/get/delete
-- `blocking_list_buckets.rs`: blocking list buckets
-- `blocking_presign_get.rs`: blocking presign with static credentials
-- `blocking_tls_root_store.rs`: blocking request TLS root policy (`S3_TLS_ROOT_STORE`)
+## Credential providers
+
+These examples list buckets using provider credentials. Set `S3_TEST_ENDPOINT` and
+`S3_TEST_REGION` for the service accessible to those credentials.
+
+**Container metadata / IMDSv2:** run on EC2 with an IAM role and IMDSv2 enabled,
+or with `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` or `AWS_CONTAINER_CREDENTIALS_FULL_URI`
+configured by your container environment.
+
+```sh
+cargo run --example async_auth_imds --features credentials-imds
+```
+
+**Web identity / STS:** provide a role ARN, token file, and STS region.
+
+```sh
+export AWS_ROLE_ARN="arn:aws:iam::123456789012:role/my-role"
+export AWS_WEB_IDENTITY_TOKEN_FILE="/path/to/token"
+export AWS_REGION="$S3_TEST_REGION"
+cargo run --example async_auth_web_identity --features credentials-sts
+```
+
+## Endpoint presets
+
+**Local MinIO:** uses `http://127.0.0.1:9000` and `us-east-1`, plus the bucket and
+AWS credentials from Setup. It ignores `S3_TEST_ENDPOINT` and `S3_TEST_REGION`.
+
+```sh
+cargo run --example minio_local_put_get_delete
+```
+
+**Cloudflare R2:** uses its own credentials and an existing R2 bucket.
+
+```sh
+export R2_ACCOUNT_ID="<account-id>"
+export R2_BUCKET="my-bucket"
+export R2_ACCESS_KEY_ID="<access-key-id>"
+export R2_SECRET_ACCESS_KEY="<secret-access-key>"
+cargo run --example r2_put_get_delete
+```
+
+Optional: `R2_SESSION_TOKEN` for temporary credentials; `R2_JURISDICTION` for
+`global` (default), `eu`, or `fedramp`.
+
+## TLS trust roots
+
+Use the Setup configuration with an HTTPS endpoint. These examples list buckets
+using system trust roots:
+
+```sh
+S3_TLS_ROOT_STORE=system cargo run --example async_tls_root_store
+S3_TLS_ROOT_STORE=system cargo run --example blocking_tls_root_store --no-default-features --features blocking-tls-rustls-ring
+```
+
+`S3_TLS_ROOT_STORE` accepts `backend-default` (default), `webpki`, or `system`.
+The credential-provider examples also accept this setting for S3 requests and
+`S3_CREDENTIALS_TLS_ROOT_STORE` for credential requests.

@@ -1,13 +1,13 @@
-#[cfg(all(feature = "async", feature = "providers"))]
+#[cfg(feature = "_async")]
 use std::{
     env,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(all(feature = "async", feature = "providers"))]
+#[cfg(feature = "_async")]
 use s3::{Auth, Credentials};
 
-#[cfg(all(feature = "async", feature = "providers"))]
+#[cfg(feature = "_async")]
 #[tokio::main]
 async fn main() -> Result<(), s3::Error> {
     let account_id = match env::var("R2_ACCOUNT_ID") {
@@ -89,8 +89,8 @@ async fn main() -> Result<(), s3::Error> {
     Ok(())
 }
 
-#[cfg(not(all(feature = "async", feature = "providers")))]
+#[cfg(not(feature = "_async"))]
 fn main() {
-    eprintln!("This example requires `async` and `providers`.");
-    eprintln!("Try: cargo run --example r2_put_get_delete --features providers");
+    eprintln!("This example requires an async client/TLS feature.");
+    eprintln!("Try: cargo run --example r2_put_get_delete");
 }

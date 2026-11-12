@@ -237,7 +237,7 @@ pub(crate) fn parse_copy_object(body: &str) -> Result<types::CopyObjectOutput, E
     Ok(types::CopyObjectOutput::from(parsed))
 }
 
-#[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "multipart", any(feature = "_async", feature = "_blocking")))]
 pub(crate) fn parse_create_multipart_upload(
     body: &str,
 ) -> Result<types::CreateMultipartUploadOutput, Error> {
@@ -248,7 +248,7 @@ pub(crate) fn parse_create_multipart_upload(
     Ok(types::CreateMultipartUploadOutput::from(parsed))
 }
 
-#[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "multipart", any(feature = "_async", feature = "_blocking")))]
 pub(crate) fn parse_complete_multipart_upload(
     body: &str,
 ) -> Result<types::CompleteMultipartUploadOutput, Error> {
@@ -259,13 +259,13 @@ pub(crate) fn parse_complete_multipart_upload(
     Ok(types::CompleteMultipartUploadOutput::from(parsed))
 }
 
-#[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "multipart", any(feature = "_async", feature = "_blocking")))]
 pub(crate) fn parse_list_parts(body: &str) -> Result<types::ListPartsOutput, Error> {
     let parsed = parse_response_xml::<xml::XmlListPartsResult>(body, "ListPartsResult")?;
     Ok(types::ListPartsOutput::from(parsed))
 }
 
-#[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "multipart", any(feature = "_async", feature = "_blocking")))]
 pub(crate) fn parse_list_multipart_uploads(
     body: &str,
 ) -> Result<types::ListMultipartUploadsOutput, Error> {
@@ -273,7 +273,7 @@ pub(crate) fn parse_list_multipart_uploads(
         .try_into()
 }
 
-#[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "multipart", any(feature = "_async", feature = "_blocking")))]
 pub(crate) fn parse_upload_part_copy(body: &str) -> Result<types::UploadPartCopyOutput, Error> {
     let parsed = parse_response_xml::<xml::XmlCopyPartResult>(body, "CopyPartResult")?;
     Ok(types::UploadPartCopyOutput::from(parsed))
@@ -1149,13 +1149,13 @@ mod tests {
             parse_list_objects_v2("<ListBucketResult><EncodingType>url</EncodingType><Name>bucket</Name></ListBucketResult>")
                 .is_err()
         );
-        #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+        #[cfg(all(feature = "multipart", any(feature = "_async", feature = "_blocking")))]
         assert!(parse_list_parts("<ListPartsResult/>").is_err());
-        #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+        #[cfg(all(feature = "multipart", any(feature = "_async", feature = "_blocking")))]
         assert!(parse_list_multipart_uploads("<ListMultipartUploadsResult><EncodingType>url</EncodingType></ListMultipartUploadsResult>").is_err());
     }
 
-    #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+    #[cfg(all(feature = "multipart", any(feature = "_async", feature = "_blocking")))]
     #[test]
     fn parses_list_multipart_uploads() {
         let xml = r#"
@@ -1196,7 +1196,7 @@ mod tests {
         assert!(out.uploads[1].initiated.is_none());
     }
 
-    #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+    #[cfg(all(feature = "multipart", any(feature = "_async", feature = "_blocking")))]
     #[test]
     fn decodes_url_encoded_multipart_keys_without_changing_upload_ids() {
         let xml = r#"
@@ -1220,7 +1220,7 @@ mod tests {
         assert_eq!(output.uploads[0].upload_id, "id%2F+value");
     }
 
-    #[cfg(all(feature = "multipart", any(feature = "async", feature = "blocking")))]
+    #[cfg(all(feature = "multipart", any(feature = "_async", feature = "_blocking")))]
     #[test]
     fn rejects_unsupported_or_malformed_multipart_key_encoding() {
         for encoding in ["", "<EncodingType>other</EncodingType>"] {

@@ -1,10 +1,10 @@
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 use std::env;
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 use s3::{Auth, Client};
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 #[tokio::main]
 async fn main() -> Result<(), s3::Error> {
     let endpoint = match env::var("S3_TEST_ENDPOINT") {
@@ -37,9 +37,9 @@ async fn main() -> Result<(), s3::Error> {
     Ok(())
 }
 
-#[cfg(not(feature = "async"))]
+#[cfg(not(feature = "_async"))]
 fn main() {
     eprintln!(
-        "This example requires the `async` feature. Try:\n  cargo run --example async_list_buckets"
+        "This example requires an async client/TLS feature. Try:\n  cargo run --example async_list_buckets"
     );
 }

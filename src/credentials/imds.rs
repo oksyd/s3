@@ -1,10 +1,8 @@
 use super::parse_expiration;
+use crate::TlsConfig;
 
-#[cfg(any(feature = "async", feature = "blocking"))]
-use reqx::{
-    advanced::TlsRootStore,
-    prelude::{RedirectPolicy, RetryPolicy, StatusPolicy},
-};
+#[cfg(any(feature = "_async", feature = "_blocking"))]
+use reqx::prelude::{RedirectPolicy, RetryPolicy, StatusPolicy};
 
 use crate::{
     auth::{Credentials, CredentialsSnapshot},
@@ -155,11 +153,11 @@ fn parse_metadata_credentials(
     parsed.into_snapshot()
 }
 
-#[cfg(feature = "async")]
-pub(crate) async fn load_async(tls_root_store: TlsRootStore) -> Result<CredentialsSnapshot, Error> {
+#[cfg(feature = "_async")]
+pub(crate) async fn load_async(tls: TlsConfig) -> Result<CredentialsSnapshot, Error> {
     use std::time::Duration;
 
-    let client = metadata_async_client(Duration::from_secs(2), tls_root_store)?;
+    let client = metadata_async_client(Duration::from_secs(2), tls)?;
 
     if let Some((url, headers)) = container_credentials_request()? {
         let resp = http_get(&client, url, &headers).await?;
@@ -186,7 +184,7 @@ pub(crate) async fn load_async(tls_root_store: TlsRootStore) -> Result<Credentia
     parse_metadata_credentials(body, "failed to parse IMDS credentials JSON")
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 async fn http_get(
     client: &reqx::Client,
     url: String,
@@ -208,7 +206,7 @@ async fn http_get(
     Err(crate::transport::response_error(resp))
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 async fn fetch_imds_v2_token(client: &reqx::Client) -> Result<http::HeaderValue, Error> {
     let resp = client
         .request(
@@ -233,7 +231,7 @@ async fn fetch_imds_v2_token(client: &reqx::Client) -> Result<http::HeaderValue,
     ))
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 fn container_auth_headers() -> Result<http::HeaderMap, Error> {
     let mut headers = http::HeaderMap::new();
     if let Some(path) = crate::util::env::optional_var("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE")? {
@@ -257,11 +255,11 @@ fn container_auth_headers() -> Result<http::HeaderMap, Error> {
     Ok(headers)
 }
 
-#[cfg(feature = "blocking")]
-pub(crate) fn load_blocking(tls_root_store: TlsRootStore) -> Result<CredentialsSnapshot, Error> {
+#[cfg(feature = "_blocking")]
+pub(crate) fn load_blocking(tls: TlsConfig) -> Result<CredentialsSnapshot, Error> {
     use std::time::Duration;
 
-    let client = metadata_blocking_client(Duration::from_secs(2), tls_root_store)?;
+    let client = metadata_blocking_client(Duration::from_secs(2), tls)?;
 
     if let Some((url, headers)) = container_credentials_request()? {
         let resp = http_get_blocking(&client, url, &headers)?;
@@ -287,7 +285,7 @@ pub(crate) fn load_blocking(tls_root_store: TlsRootStore) -> Result<CredentialsS
     parse_metadata_credentials(body, "failed to parse IMDS credentials JSON")
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 fn http_get_blocking(
     client: &reqx::blocking::Client,
     url: String,
@@ -310,7 +308,7 @@ fn http_get_blocking(
     Err(crate::transport::response_error(resp))
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 fn fetch_imds_v2_token_blocking(
     client: &reqx::blocking::Client,
 ) -> Result<http::HeaderValue, Error> {
@@ -366,7 +364,7 @@ fn imds_role_name_from_body(body: &str) -> Result<&str, Error> {
     Ok(role)
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 fn container_authorization_header_value(
     source: &'static str,
     raw: &str,
@@ -394,10 +392,10 @@ fn container_authorization_header_value(
         .map_err(|_| Error::invalid_config("invalid container authorization token"))
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 fn metadata_async_client(
     timeout: std::time::Duration,
-    tls_root_store: TlsRootStore,
+    tls: TlsConfig,
 ) -> Result<reqx::Client, Error> {
     reqx::Client::builder("http://localhost")
         .request_timeout(timeout)
@@ -405,17 +403,17 @@ fn metadata_async_client(
         .redirect_policy(RedirectPolicy::none())
         .default_status_policy(StatusPolicy::Response)
         .max_response_body_bytes(1024 * 1024)
-        .tls_backend(crate::transport::default_tls_backend())
-        .tls_root_store(tls_root_store)
+        .tls_backend(tls.async_backend()?)
+        .tls_root_store(tls.root_store.into_reqx())
         .client_name("s3-imds")
         .build()
         .map_err(|e| Error::transport("failed to build HTTP client", Some(Box::new(e))))
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 fn metadata_blocking_client(
     timeout: std::time::Duration,
-    tls_root_store: TlsRootStore,
+    tls: TlsConfig,
 ) -> Result<reqx::blocking::Client, Error> {
     reqx::blocking::Client::builder("http://localhost")
         .request_timeout(timeout)
@@ -423,8 +421,8 @@ fn metadata_blocking_client(
         .redirect_policy(RedirectPolicy::none())
         .default_status_policy(StatusPolicy::Response)
         .max_response_body_bytes(1024 * 1024)
-        .tls_backend(crate::transport::default_tls_backend())
-        .tls_root_store(tls_root_store)
+        .tls_backend(tls.blocking_backend()?)
+        .tls_root_store(tls.root_store.into_reqx())
         .client_name("s3-imds")
         .build()
         .map_err(|e| Error::transport("failed to build HTTP client", Some(Box::new(e))))
@@ -432,6 +430,7 @@ fn metadata_blocking_client(
 
 #[cfg(test)]
 mod tests {
+    use crate::TlsRootStore;
     use std::io::{ErrorKind, Read, Write};
     use std::net::{SocketAddr, TcpListener};
     use std::thread::JoinHandle;
@@ -501,10 +500,12 @@ mod tests {
         Ok((addr, handle))
     }
 
-    #[cfg(all(
-        any(feature = "async", feature = "blocking"),
-        feature = "native-tls",
-        not(feature = "rustls")
+    #[cfg(any(
+        all(feature = "async-tls-native", not(feature = "async-tls-rustls-ring")),
+        all(
+            feature = "blocking-tls-native",
+            not(feature = "blocking-tls-rustls-ring")
+        )
     ))]
     fn assert_native_tls_webpki_error(err: Error) {
         match err {
@@ -740,7 +741,7 @@ mod tests {
         assert!(imds_role_name_from_body(&"a".repeat(65)).is_err());
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn container_authorization_header_value_is_strict_about_boundaries() {
         assert_eq!(
@@ -765,21 +766,21 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     #[test]
     fn metadata_async_client_accepts_backend_default() {
-        let client = metadata_async_client(Duration::from_secs(1), TlsRootStore::BackendDefault);
+        let client = metadata_async_client(Duration::from_secs(1), TlsConfig::default());
         let client = client.expect("async metadata client should build");
         assert_eq!(client.default_status_policy(), StatusPolicy::Response);
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     #[tokio::test]
     async fn http_get_does_not_follow_redirects_async() -> std::result::Result<(), Error> {
         let (addr, handle) = spawn_test_server(
             b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
         )?;
-        let client = metadata_async_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
+        let client = metadata_async_client(Duration::from_secs(2), TlsConfig::default())?;
         let err = http_get(&client, format!("http://{addr}/"), &http::HeaderMap::new())
             .await
             .expect_err("redirects must be returned as API errors");
@@ -790,13 +791,13 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     #[tokio::test]
     async fn http_get_maps_429_to_rate_limited_async() -> std::result::Result<(), Error> {
         let (addr, handle) = spawn_test_server(
             b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3\r\nx-amz-request-id: req-1\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow".to_vec(),
         )?;
-        let client = metadata_async_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
+        let client = metadata_async_client(Duration::from_secs(2), TlsConfig::default())?;
         let url = format!("http://{addr}/");
 
         let err = http_get(&client, url, &http::HeaderMap::new())
@@ -823,39 +824,56 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(feature = "async", feature = "rustls"))]
+    #[cfg(any(
+        feature = "async-tls-rustls-ring",
+        all(
+            feature = "async-tls-rustls-graviola",
+            not(feature = "async-tls-native")
+        )
+    ))]
     #[test]
     fn metadata_async_client_accepts_webpki_on_rustls() {
-        let client = metadata_async_client(Duration::from_secs(1), TlsRootStore::WebPki);
+        let client = metadata_async_client(
+            Duration::from_secs(1),
+            TlsConfig {
+                root_store: TlsRootStore::WebPki,
+                ..TlsConfig::default()
+            },
+        );
         assert!(client.is_ok(), "rustls should accept WebPki root store");
     }
 
-    #[cfg(all(feature = "async", feature = "native-tls", not(feature = "rustls")))]
+    #[cfg(all(feature = "async-tls-native", not(feature = "async-tls-rustls-ring")))]
     #[test]
     fn metadata_async_client_rejects_webpki_on_native_tls() {
-        let err = match metadata_async_client(Duration::from_secs(1), TlsRootStore::WebPki) {
+        let err = match metadata_async_client(
+            Duration::from_secs(1),
+            TlsConfig {
+                root_store: TlsRootStore::WebPki,
+                ..TlsConfig::default()
+            },
+        ) {
             Ok(_) => panic!("native-tls should reject WebPki root store"),
             Err(err) => err,
         };
         assert_native_tls_webpki_error(err);
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     #[test]
     fn metadata_blocking_client_accepts_backend_default() {
-        let client = metadata_blocking_client(Duration::from_secs(1), TlsRootStore::BackendDefault);
+        let client = metadata_blocking_client(Duration::from_secs(1), TlsConfig::default());
         let client = client.expect("blocking metadata client should build");
         assert_eq!(client.default_status_policy(), StatusPolicy::Response);
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     #[test]
     fn http_get_does_not_follow_redirects_blocking() -> std::result::Result<(), Error> {
         let (addr, handle) = spawn_test_server(
             b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
         )?;
-        let client =
-            metadata_blocking_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
+        let client = metadata_blocking_client(Duration::from_secs(2), TlsConfig::default())?;
         let err = http_get_blocking(&client, format!("http://{addr}/"), &http::HeaderMap::new())
             .expect_err("redirects must be returned as API errors");
         handle
@@ -865,14 +883,13 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     #[test]
     fn http_get_blocking_maps_429_to_rate_limited() -> std::result::Result<(), Error> {
         let (addr, handle) = spawn_test_server(
             b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3\r\nx-amz-request-id: req-1\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow".to_vec(),
         )?;
-        let client =
-            metadata_blocking_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
+        let client = metadata_blocking_client(Duration::from_secs(2), TlsConfig::default())?;
         let url = format!("http://{addr}/");
 
         let err = http_get_blocking(&client, url, &http::HeaderMap::new())
@@ -898,20 +915,74 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(feature = "blocking", feature = "rustls"))]
+    #[cfg(any(
+        feature = "blocking-tls-rustls-ring",
+        all(
+            feature = "blocking-tls-rustls-graviola",
+            not(feature = "blocking-tls-native")
+        )
+    ))]
     #[test]
     fn metadata_blocking_client_accepts_webpki_on_rustls() {
-        let client = metadata_blocking_client(Duration::from_secs(1), TlsRootStore::WebPki);
+        let client = metadata_blocking_client(
+            Duration::from_secs(1),
+            TlsConfig {
+                root_store: TlsRootStore::WebPki,
+                ..TlsConfig::default()
+            },
+        );
         assert!(client.is_ok(), "rustls should accept WebPki root store");
     }
 
-    #[cfg(all(feature = "blocking", feature = "native-tls", not(feature = "rustls")))]
+    #[cfg(all(
+        feature = "blocking-tls-native",
+        not(feature = "blocking-tls-rustls-ring")
+    ))]
     #[test]
     fn metadata_blocking_client_rejects_webpki_on_native_tls() {
-        let err = match metadata_blocking_client(Duration::from_secs(1), TlsRootStore::WebPki) {
+        let err = match metadata_blocking_client(
+            Duration::from_secs(1),
+            TlsConfig {
+                root_store: TlsRootStore::WebPki,
+                ..TlsConfig::default()
+            },
+        ) {
             Ok(_) => panic!("native-tls should reject WebPki root store"),
             Err(err) => err,
         };
         assert_native_tls_webpki_error(err);
+    }
+    #[cfg(feature = "async-tls-rustls-graviola")]
+    #[test]
+    fn metadata_async_client_uses_explicit_graviola() {
+        let client = metadata_async_client(
+            Duration::from_secs(1),
+            TlsConfig {
+                backend: Some(crate::TlsBackend::RustlsGraviola),
+                ..TlsConfig::default()
+            },
+        )
+        .expect("explicit Graviola backend should build");
+        assert_eq!(
+            client.tls_backend(),
+            reqx::advanced::TlsBackend::RustlsGraviola
+        );
+    }
+
+    #[cfg(feature = "blocking-tls-rustls-graviola")]
+    #[test]
+    fn metadata_blocking_client_uses_explicit_graviola() {
+        let client = metadata_blocking_client(
+            Duration::from_secs(1),
+            TlsConfig {
+                backend: Some(crate::TlsBackend::RustlsGraviola),
+                ..TlsConfig::default()
+            },
+        )
+        .expect("explicit Graviola backend should build");
+        assert_eq!(
+            client.tls_backend(),
+            reqx::advanced::TlsBackend::RustlsGraviola
+        );
     }
 }

@@ -1,4 +1,5 @@
-//! Lean, modern, unofficial S3-compatible client for Rust.
+//! An unofficial S3-compatible client for Rust, with async and blocking APIs,
+//! presigned URLs, and multipart uploads.
 //!
 //! ## Start here
 //!
@@ -22,12 +23,12 @@
 //!   bucket operations.
 //! - [`types`] contains the public request and response models you work with. Protocol XML mapping
 //!   stays internal.
-//! - Optional `providers` presets bootstrap common S3-compatible endpoints.
+//! - [`providers`] presets bootstrap common S3-compatible endpoints.
 //!
 //! ## Quick start (async)
 //!
 //! ```no_run
-//! # #[cfg(feature = "async")]
+//! # #[cfg(feature = "_async")]
 //! # async fn demo() -> Result<(), s3::Error> {
 //! use s3::{Auth, Client};
 //!
@@ -50,7 +51,7 @@
 //! ## Quick start (blocking)
 //!
 //! ```no_run
-//! # #[cfg(feature = "blocking")]
+//! # #[cfg(feature = "_blocking")]
 //! # fn demo() -> Result<(), s3::Error> {
 //! use s3::{Auth, BlockingClient};
 //!
@@ -76,68 +77,118 @@
 //! - Manage bucket settings: [`api::PutBucketLifecycleRequest`], [`api::PutBucketCorsRequest`],
 //!   [`api::PutBucketTaggingRequest`], [`api::PutBucketEncryptionRequest`]
 //!
-//! ## Feature visibility
+//! ## Features
 //!
-//! Docs.rs builds this crate with all features enabled. Feature-gated items are labeled on their
-//! docs pages so you can tell whether an API requires `async`, `blocking`, `providers`,
-//! `multipart`, or one of the optional credential features.
+//! Select a client mode and TLS backend:
 //!
-//! ## Examples and docs
+//! | Feature | Client | TLS backend |
+//! | --- | --- | --- |
+//! | `async-tls-rustls-ring` (default) | Async | rustls with ring |
+//! | `async-tls-rustls-graviola` | Async | rustls with Graviola |
+//! | `async-tls-native` | Async | native-tls |
+//! | `blocking-tls-rustls-ring` | Blocking | rustls with ring |
+//! | `blocking-tls-rustls-graviola` | Blocking | rustls with Graviola |
+//! | `blocking-tls-native` | Blocking | native-tls |
 //!
-//! See the README and `examples/README.md` for a usage guide organized around auth, client
-//! builders, object and bucket services, TLS policy, and blocking variants.
+//! Use `default-features = false` for blocking-only builds or to replace the default
+//! TLS backend. For example:
+//!
+//! ```toml
+//! [dependencies]
+//! s3 = { version = "0.1", default-features = false, features = ["blocking-tls-rustls-ring"] }
+//! ```
+//!
+//! Each feature enables only its corresponding HTTP client. Combine features to use
+//! both modes, including different TLS backends per mode. [`TlsConfig`] controls
+//! backend selection and trust roots. Set [`TlsConfig::backend`] explicitly when
+//! Cargo unifies multiple backend features and a particular backend is required.
+//! Graviola is configured per client; no process-wide crypto provider is needed.
+//!
+//! Additional capabilities are opt-in:
+//!
+//! | Feature | Capability |
+//! | --- | --- |
+//! | `multipart` | Multipart upload operations |
+//! | `checksums` | Upload checksum calculation and headers |
+//! | `credentials-profile` | Shared configuration and credentials file loading |
+//! | `credentials-imds` | Container metadata and IMDSv2 credentials |
+//! | `credentials-sts` | STS assume-role and web identity credentials |
+//! | `tracing` | Request tracing |
+//! | `metrics` | Request metrics |
+//!
+//! `credentials-imds` and `credentials-sts` require a client/TLS feature.
+//! Endpoint presets in [`providers`] are always available.
+//!
+//! Docs.rs builds with all features enabled. Feature-gated items are labeled on
+//! their documentation pages. `_async` and `_blocking` are internal mode switches
+//! enabled by the client/TLS features; do not select them directly.
+//!
+//! ## Examples
+//!
+//! See the [runnable examples](https://github.com/oksyd/s3/tree/main/examples)
+//! for object operations, credential providers, TLS configuration, and blocking clients.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[cfg(all(
-    feature = "rustls",
-    feature = "native-tls",
-    not(feature = "allow-both-tls")
+    feature = "_async",
+    not(any(
+        feature = "async-tls-rustls-ring",
+        feature = "async-tls-rustls-graviola",
+        feature = "async-tls-native"
+    ))
 ))]
-compile_error!("Enable only one of: rustls, native-tls.");
+compile_error!(
+    "Enable `async-tls-rustls-ring`, `async-tls-rustls-graviola`, or `async-tls-native` to use the async client."
+);
 
 #[cfg(all(
-    any(feature = "async", feature = "blocking"),
-    not(any(feature = "rustls", feature = "native-tls"))
+    feature = "_blocking",
+    not(any(
+        feature = "blocking-tls-rustls-ring",
+        feature = "blocking-tls-rustls-graviola",
+        feature = "blocking-tls-native"
+    ))
 ))]
-compile_error!("Enable one of: rustls, native-tls.");
+compile_error!(
+    "Enable `blocking-tls-rustls-ring`, `blocking-tls-rustls-graviola`, or `blocking-tls-native` to use the blocking client."
+);
 
 #[cfg(all(
     any(feature = "credentials-imds", feature = "credentials-sts"),
-    not(any(feature = "async", feature = "blocking"))
+    not(any(feature = "_async", feature = "_blocking"))
 ))]
-compile_error!("Enable `async` or `blocking` when using `credentials-imds` or `credentials-sts`.");
+compile_error!("Enable a client/TLS feature when using `credentials-imds` or `credentials-sts`.");
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 /// Service entry points and request builders.
 pub mod api;
-#[cfg(feature = "providers")]
 /// Endpoint presets for common S3-compatible services.
 pub mod providers;
 /// Shared request/response types.
 pub mod types;
 
 mod auth;
-#[cfg(any(test, feature = "async", feature = "blocking"))]
+#[cfg(any(test, feature = "_async", feature = "_blocking"))]
 mod client;
 mod credentials;
 mod error;
 mod tls;
-#[cfg(any(test, feature = "async", feature = "blocking"))]
+#[cfg(any(test, feature = "_async", feature = "_blocking"))]
 mod transport;
 mod util;
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub use auth::CachedProvider;
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 pub use auth::CredentialsFuture;
 pub use auth::{
     AddressingStyle, Auth, Credentials, CredentialsProvider, CredentialsSnapshot,
     DynCredentialsProvider, Region,
 };
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 pub use client::{BlockingClient, BlockingClientBuilder};
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 pub use client::{Client, ClientBuilder};
 pub use error::{ApiError, Error, Result};
-pub use tls::TlsRootStore;
+pub use tls::{TlsBackend, TlsConfig, TlsRootStore};

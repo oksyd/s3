@@ -1,19 +1,19 @@
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 use std::{
     env,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 use bytes::Bytes;
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 use futures_util::stream;
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 use s3::{Auth, Client};
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 #[tokio::main]
 async fn main() -> Result<(), s3::Error> {
     let endpoint = match env::var("S3_TEST_ENDPOINT") {
@@ -76,7 +76,7 @@ async fn main() -> Result<(), s3::Error> {
     Ok(())
 }
 
-#[cfg(not(feature = "async"))]
+#[cfg(not(feature = "_async"))]
 fn main() {
-    eprintln!("This example requires the `async` feature (enabled by default).");
+    eprintln!("This example requires an async client/TLS feature (enabled by default).");
 }

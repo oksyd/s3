@@ -57,35 +57,32 @@ tokio = { version = "1.54.0", default-features = false, features = ["macros", "r
 ureq = { version = "3.4.2", default-features = false }
 
 [features]
-default = ["async", "rustls"]
+default = ["async-tls-rustls-ring"]
 
-async = [
+_async = [
   "dep:reqx",
   "dep:futures-core",
   "dep:futures-util",
   "dep:tokio",
   "dep:http-body-util",
 ]
-blocking = ["dep:reqx"]
+_blocking = ["dep:reqx"]
+
+async-tls-rustls-ring = ["_async", "reqx/async-tls-rustls-ring"]
+async-tls-rustls-graviola = ["_async", "reqx/async-tls-rustls-graviola"]
+async-tls-native = ["_async", "reqx/async-tls-native"]
+blocking-tls-rustls-ring = ["_blocking", "reqx/blocking-tls-rustls-ring"]
+blocking-tls-rustls-graviola = ["_blocking", "reqx/blocking-tls-rustls-graviola"]
+blocking-tls-native = ["_blocking", "reqx/blocking-tls-native"]
 
 tracing = ["dep:tracing"]
 metrics = ["dep:metrics"]
 
 checksums = ["dep:crc-fast", "dep:sha1"]
 multipart = []
-providers = []
 credentials-profile = []
 credentials-imds = ["dep:serde_json"]
 credentials-sts = []
-
-rustls = [
-  "reqx?/async-tls-rustls-ring",
-  "reqx?/blocking-tls-rustls-ring",
-]
-native-tls = ["reqx?/async-tls-native", "reqx?/blocking-tls-native"]
-
-allow-both-tls = []
-unstable-raw = []
 
 [[bench]]
 name = "bench"

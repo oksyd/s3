@@ -1,13 +1,13 @@
-#[cfg(all(feature = "async", feature = "multipart"))]
+#[cfg(all(feature = "_async", feature = "multipart"))]
 use std::{
     env,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(all(feature = "async", feature = "multipart"))]
+#[cfg(all(feature = "_async", feature = "multipart"))]
 use s3::{Auth, Client, Error};
 
-#[cfg(all(feature = "async", feature = "multipart"))]
+#[cfg(all(feature = "_async", feature = "multipart"))]
 #[tokio::main]
 async fn main() -> Result<(), s3::Error> {
     let endpoint = match env::var("S3_TEST_ENDPOINT") {
@@ -103,8 +103,8 @@ async fn main() -> Result<(), s3::Error> {
     Ok(())
 }
 
-#[cfg(not(all(feature = "async", feature = "multipart")))]
+#[cfg(not(all(feature = "_async", feature = "multipart")))]
 fn main() {
-    eprintln!("This example requires `async` and `multipart`.");
+    eprintln!("This example requires an async client/TLS feature and `multipart`.");
     eprintln!("Try: cargo run --example async_multipart_upload --features multipart");
 }

@@ -1,10 +1,10 @@
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 use std::env;
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 use s3::{Auth, BlockingClient};
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 fn main() -> Result<(), s3::Error> {
     let endpoint = match env::var("S3_TEST_ENDPOINT") {
         Ok(v) => v,
@@ -36,9 +36,9 @@ fn main() -> Result<(), s3::Error> {
     Ok(())
 }
 
-#[cfg(not(feature = "blocking"))]
+#[cfg(not(feature = "_blocking"))]
 fn main() {
     eprintln!(
-        "This example requires the `blocking` feature. Try:\n  cargo run --example blocking_list_buckets --no-default-features --features blocking,rustls"
+        "This example requires a blocking client/TLS feature. Try:\n  cargo run --example blocking_list_buckets --no-default-features --features blocking-tls-rustls-ring"
     );
 }

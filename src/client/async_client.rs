@@ -1,6 +1,6 @@
 use std::{borrow::Cow, sync::Arc, time::Duration};
 
-use crate::TlsRootStore;
+use crate::TlsConfig;
 use http::{HeaderMap, Method, Uri};
 use time::OffsetDateTime;
 use url::Url;
@@ -36,7 +36,7 @@ pub struct ClientBuilder {
     retry: crate::transport::RetryConfig,
     timeout: Option<Duration>,
     user_agent: Option<String>,
-    tls_root_store: TlsRootStore,
+    tls: TlsConfig,
 }
 
 struct Inner {
@@ -257,7 +257,7 @@ impl ClientBuilder {
             retry: crate::transport::RetryConfig::default(),
             timeout: None,
             user_agent: None,
-            tls_root_store: TlsRootStore::BackendDefault,
+            tls: TlsConfig::default(),
         })
     }
 
@@ -315,12 +315,12 @@ impl ClientBuilder {
         self
     }
 
-    /// Sets the trust root policy for async HTTPS requests.
+    /// Sets the TLS backend and certificate trust roots for S3 requests.
     ///
-    /// Builder default is `BackendDefault`.
-    /// Use `System` for enterprise/private PKI environments that rely on OS trust stores.
-    pub fn tls_root_store(mut self, tls_root_store: TlsRootStore) -> Self {
-        self.tls_root_store = tls_root_store;
+    /// Credential providers have their own TLS configuration. Pass the same
+    /// [`TlsConfig`] to their constructor to share this policy.
+    pub fn tls(mut self, tls: TlsConfig) -> Self {
+        self.tls = tls;
         self
     }
 
@@ -331,12 +331,7 @@ impl ClientBuilder {
             .ok_or_else(|| Error::invalid_config("region is required"))
             .and_then(Region::new)?;
 
-        let transport = AsyncTransport::new(
-            self.retry,
-            self.user_agent,
-            self.timeout,
-            self.tls_root_store.into_reqx(),
-        )?;
+        let transport = AsyncTransport::new(self.retry, self.user_agent, self.timeout, self.tls)?;
 
         let inner = Inner {
             endpoint: self.endpoint,
@@ -355,12 +350,15 @@ impl ClientBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "async-tls-native")]
+    use crate::TlsBackend;
+    use crate::TlsRootStore;
 
     #[derive(Debug)]
     struct FixedProvider;
 
     impl crate::auth::CredentialsProvider for FixedProvider {
-        #[cfg(feature = "async")]
+        #[cfg(feature = "_async")]
         fn credentials_async(&self) -> crate::auth::CredentialsFuture<'_> {
             Box::pin(async {
                 let creds = crate::auth::Credentials::new("AKIA_TEST", "SECRET_TEST")?;
@@ -368,7 +366,7 @@ mod tests {
             })
         }
 
-        #[cfg(feature = "blocking")]
+        #[cfg(feature = "_blocking")]
         fn credentials_blocking(&self) -> crate::Result<crate::auth::CredentialsSnapshot> {
             let creds = crate::auth::Credentials::new("AKIA_TEST", "SECRET_TEST")?;
             Ok(crate::auth::CredentialsSnapshot::new(creds))
@@ -378,15 +376,18 @@ mod tests {
     #[test]
     fn builder_defaults_tls_root_store_to_backend_default() {
         let builder = ClientBuilder::new("https://s3.example.com").expect("builder should parse");
-        assert_eq!(builder.tls_root_store, TlsRootStore::BackendDefault);
+        assert_eq!(builder.tls.root_store, TlsRootStore::BackendDefault);
     }
 
     #[test]
     fn builder_tls_root_store_override_is_applied() {
         let builder = ClientBuilder::new("https://s3.example.com")
             .expect("builder should parse")
-            .tls_root_store(TlsRootStore::System);
-        assert_eq!(builder.tls_root_store, TlsRootStore::System);
+            .tls(TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            });
+        assert_eq!(builder.tls.root_store, TlsRootStore::System);
     }
 
     #[test]
@@ -421,14 +422,23 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "rustls")]
+    #[cfg(any(
+        feature = "async-tls-rustls-ring",
+        all(
+            feature = "async-tls-rustls-graviola",
+            not(feature = "async-tls-native")
+        )
+    ))]
     #[test]
     fn build_accepts_webpki_on_rustls() {
         let client = Client::builder("https://s3.example.com")
             .expect("builder should parse")
             .region("us-east-1")
             .auth(Auth::Anonymous)
-            .tls_root_store(TlsRootStore::WebPki)
+            .tls(TlsConfig {
+                root_store: TlsRootStore::WebPki,
+                ..TlsConfig::default()
+            })
             .build();
         assert!(client.is_ok(), "rustls should accept WebPki root store");
     }
@@ -461,14 +471,17 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "native-tls", not(feature = "rustls")))]
+    #[cfg(feature = "async-tls-native")]
     #[test]
-    fn build_rejects_webpki_on_native_tls() {
+    fn build_rejects_webpki_on_explicit_native_tls() {
         let err = match Client::builder("https://s3.example.com")
             .expect("builder should parse")
             .region("us-east-1")
             .auth(Auth::Anonymous)
-            .tls_root_store(TlsRootStore::WebPki)
+            .tls(TlsConfig {
+                backend: Some(TlsBackend::NativeTls),
+                root_store: TlsRootStore::WebPki,
+            })
             .build()
         {
             Ok(_) => panic!("native-tls should reject WebPki root store"),

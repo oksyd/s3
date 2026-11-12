@@ -1,5 +1,3 @@
-#[cfg(any(feature = "async", feature = "blocking"))]
-use std::cfg_select;
 use std::{
     sync::{
         OnceLock,
@@ -8,31 +6,29 @@ use std::{
     time::Duration,
 };
 
-#[cfg(any(feature = "tracing", feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "tracing", feature = "_async", feature = "_blocking"))]
 const REDACTED_HOST: &str = "<redacted-host>";
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 pub(crate) mod async_transport;
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 pub(crate) mod blocking_transport;
 
-#[cfg(all(feature = "metrics", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "metrics", any(feature = "_async", feature = "_blocking")))]
 use http::HeaderMap;
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use http::Method;
 #[cfg(all(
     any(test, feature = "metrics"),
-    any(feature = "async", feature = "blocking")
+    any(feature = "_async", feature = "_blocking")
 ))]
 use http::StatusCode;
-#[cfg(any(feature = "async", feature = "blocking"))]
-use reqx::advanced::TlsBackend;
-#[cfg(all(feature = "metrics", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "metrics", any(feature = "_async", feature = "_blocking")))]
 use reqx::{
     Error as ReqxError, ErrorCode as ReqxErrorCode,
     advanced::{Interceptor, Observer, RequestContext},
 };
-#[cfg(any(feature = "tracing", feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "tracing", feature = "_async", feature = "_blocking"))]
 use url::Url;
 
 #[derive(Clone, Copy, Debug)]
@@ -54,7 +50,7 @@ impl Default for RetryConfig {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl RetryConfig {
     pub(crate) fn validate(self) -> crate::error::Result<Self> {
         if self.max_attempts == 0 {
@@ -71,12 +67,12 @@ impl RetryConfig {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) const MAX_BUFFERED_RESPONSE_BODY_BYTES: usize = 32 * 1024 * 1024;
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) const MAX_ERROR_RESPONSE_BODY_BYTES: usize = 256 * 1024;
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) enum RequestBody<S> {
     Empty,
     Bytes(bytes::Bytes),
@@ -86,7 +82,7 @@ pub(crate) enum RequestBody<S> {
     },
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl<S> RequestBody<S> {
     fn is_replayable(&self) -> bool {
         !matches!(self, Self::Stream { .. })
@@ -100,7 +96,7 @@ impl<S> RequestBody<S> {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn ensure_method_accepts_body<S>(
     method: &Method,
     body: &RequestBody<S>,
@@ -115,7 +111,7 @@ pub(crate) fn ensure_method_accepts_body<S>(
     Ok(())
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn prepare_user_agent(
     user_agent: Option<String>,
 ) -> crate::error::Result<(String, http::HeaderValue)> {
@@ -135,7 +131,7 @@ pub(crate) fn prepare_user_agent(
     Ok((user_agent_text, user_agent))
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn validate_request_timeout(timeout: Option<Duration>) -> crate::error::Result<()> {
     if timeout.is_some_and(|timeout| timeout.is_zero()) {
         return Err(crate::error::Error::invalid_config("timeout must be > 0"));
@@ -156,25 +152,16 @@ pub(crate) fn backoff_delay(config: RetryConfig, attempt: u32) -> Duration {
     Duration::from_millis(jitter as u64)
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
-pub(crate) fn default_tls_backend() -> TlsBackend {
-    cfg_select! {
-        feature = "rustls" => TlsBackend::RustlsRing,
-        feature = "native-tls" => TlsBackend::NativeTls,
-        _ => TlsBackend::RustlsRing,
-    }
-}
-
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn default_user_agent() -> String {
     format!("s3/{}", env!("CARGO_PKG_VERSION"))
 }
 
-#[cfg(all(feature = "metrics", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "metrics", any(feature = "_async", feature = "_blocking")))]
 #[derive(Debug, Default)]
 pub(crate) struct TransportMetricsObserver;
 
-#[cfg(all(feature = "metrics", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "metrics", any(feature = "_async", feature = "_blocking")))]
 impl Observer for TransportMetricsObserver {
     fn on_request_start(&self, context: &RequestContext) {
         metrics::counter!("s3_http_attempts_total", "method" => method_label(context.method()))
@@ -182,11 +169,11 @@ impl Observer for TransportMetricsObserver {
     }
 }
 
-#[cfg(all(feature = "metrics", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "metrics", any(feature = "_async", feature = "_blocking")))]
 #[derive(Debug, Default)]
 pub(crate) struct TransportMetricsInterceptor;
 
-#[cfg(all(feature = "metrics", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "metrics", any(feature = "_async", feature = "_blocking")))]
 impl Interceptor for TransportMetricsInterceptor {
     fn on_response(&self, context: &RequestContext, status: StatusCode, _headers: &HeaderMap) {
         metrics::counter!(
@@ -207,7 +194,7 @@ impl Interceptor for TransportMetricsInterceptor {
     }
 }
 
-#[cfg(all(feature = "metrics", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "metrics", any(feature = "_async", feature = "_blocking")))]
 fn reqx_error_kind_label(error: &ReqxError) -> &'static str {
     match error.code() {
         ReqxErrorCode::MissingRedirectLocation
@@ -218,7 +205,7 @@ fn reqx_error_kind_label(error: &ReqxError) -> &'static str {
     }
 }
 
-#[cfg(all(feature = "metrics", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "metrics", any(feature = "_async", feature = "_blocking")))]
 pub(crate) fn status_class(status: StatusCode) -> &'static str {
     if status.is_informational() {
         "1xx"
@@ -235,7 +222,7 @@ pub(crate) fn status_class(status: StatusCode) -> &'static str {
     }
 }
 
-#[cfg(all(feature = "metrics", any(feature = "async", feature = "blocking")))]
+#[cfg(all(feature = "metrics", any(feature = "_async", feature = "_blocking")))]
 pub(crate) fn method_label(method: &Method) -> &'static str {
     match method.as_str() {
         "GET" => "GET",
@@ -274,17 +261,17 @@ fn next_jitter_u64() -> u64 {
     advance_jitter_state(previous)
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 fn request_id_from_headers(headers: &http::HeaderMap) -> Option<String> {
     header_text_from_headers(headers, &["x-amz-request-id", "x-request-id"])
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 fn host_id_from_headers(headers: &http::HeaderMap) -> Option<String> {
     header_text_from_headers(headers, &["x-amz-id-2", "x-amz-host-id"])
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 fn header_text_from_headers(headers: &http::HeaderMap, names: &[&str]) -> Option<String> {
     names.iter().find_map(|name| {
         headers
@@ -296,7 +283,7 @@ fn header_text_from_headers(headers: &http::HeaderMap, names: &[&str]) -> Option
     })
 }
 
-#[cfg(any(test, feature = "async", feature = "blocking"))]
+#[cfg(any(test, feature = "_async", feature = "_blocking"))]
 pub(crate) fn retry_after_from_headers(headers: &http::HeaderMap) -> Option<Duration> {
     headers
         .get(http::header::RETRY_AFTER)
@@ -304,12 +291,12 @@ pub(crate) fn retry_after_from_headers(headers: &http::HeaderMap) -> Option<Dura
         .and_then(parse_retry_after_value)
 }
 
-#[cfg(any(test, feature = "async", feature = "blocking"))]
+#[cfg(any(test, feature = "_async", feature = "_blocking"))]
 pub(crate) fn clamp_retry_after(config: RetryConfig, retry_after: Duration) -> Duration {
     retry_after.min(config.max_retry_after)
 }
 
-#[cfg(any(test, feature = "async", feature = "blocking"))]
+#[cfg(any(test, feature = "_async", feature = "_blocking"))]
 fn parse_retry_after_value(value: &str) -> Option<Duration> {
     let value = value.trim();
     if value.is_empty() {
@@ -328,7 +315,7 @@ fn parse_retry_after_value(value: &str) -> Option<Duration> {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) struct RequestTimer {
     #[cfg(feature = "metrics")]
     start: std::time::Instant,
@@ -336,7 +323,7 @@ pub(crate) struct RequestTimer {
     method: &'static str,
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl RequestTimer {
     pub(crate) fn start(method: &Method) -> Self {
         #[cfg(not(feature = "metrics"))]
@@ -350,7 +337,7 @@ impl RequestTimer {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl Drop for RequestTimer {
     fn drop(&mut self) {
         #[cfg(feature = "metrics")]
@@ -362,7 +349,7 @@ impl Drop for RequestTimer {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn record_service_error(method: &Method) {
     #[cfg(feature = "metrics")]
     metrics::counter!(
@@ -376,7 +363,7 @@ pub(crate) fn record_service_error(method: &Method) {
     let _ = method;
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn record_retry(method: &Method, reason: &'static str) {
     #[cfg(feature = "metrics")]
     metrics::counter!(
@@ -390,7 +377,7 @@ pub(crate) fn record_retry(method: &Method, reason: &'static str) {
     let _ = (method, reason);
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn response_error_from_status(
     status: http::StatusCode,
     headers: &http::HeaderMap,
@@ -404,12 +391,12 @@ pub(crate) fn response_error_from_status(
     )
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn response_error(resp: reqx::Response) -> crate::error::Error {
     response_error_from_body(resp.status(), resp.headers(), resp.body())
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn response_error_from_body(
     status: http::StatusCode,
     headers: &http::HeaderMap,
@@ -421,7 +408,7 @@ pub(crate) fn response_error_from_body(
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 fn response_error_from_parts(
     status: http::StatusCode,
     headers: &http::HeaderMap,
@@ -452,7 +439,7 @@ fn response_error_from_parts(
     }))
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn response_service_error(
     status: http::StatusCode,
     headers: &http::HeaderMap,
@@ -462,7 +449,7 @@ pub(crate) fn response_service_error(
         .map(|parsed| response_error_from_parts(status, headers, Some(parsed), Some(body)))
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn response_error_if_any(resp: &reqx::Response) -> Option<crate::Error> {
     if resp.status().is_success() {
         response_service_error(
@@ -479,7 +466,7 @@ pub(crate) fn response_error_if_any(resp: &reqx::Response) -> Option<crate::Erro
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn transport_retry_delay(
     retry: RetryConfig,
     attempt: u32,
@@ -506,7 +493,7 @@ pub(crate) fn transport_retry_delay(
     .then(|| backoff_delay(retry, attempt))
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn service_retry_delay(
     retry: RetryConfig,
     attempt: u32,
@@ -527,7 +514,7 @@ pub(crate) fn service_retry_delay(
     })
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 fn method_allows_status_retry(method: &Method) -> bool {
     matches!(
         *method,
@@ -535,7 +522,7 @@ fn method_allows_status_retry(method: &Method) -> bool {
     )
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 struct SanitizedReqxSource {
     code: reqx::ErrorCode,
     method: Option<http::Method>,
@@ -544,7 +531,7 @@ struct SanitizedReqxSource {
     source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl SanitizedReqxSource {
     fn from_reqx(error: reqx::Error) -> Self {
         let mut sanitized = Self {
@@ -652,7 +639,7 @@ impl SanitizedReqxSource {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl std::fmt::Display for SanitizedReqxSource {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "reqx {}", self.code.as_str())?;
@@ -672,7 +659,7 @@ impl std::fmt::Display for SanitizedReqxSource {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl std::fmt::Debug for SanitizedReqxSource {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -682,14 +669,14 @@ impl std::fmt::Debug for SanitizedReqxSource {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl std::error::Error for SanitizedReqxSource {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_deref().map(|error| error as _)
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 fn redacted_uri_for_error(uri: &str) -> String {
     match Url::parse(uri) {
         Ok(url) => redacted_url_for_error(&url),
@@ -697,7 +684,7 @@ fn redacted_uri_for_error(uri: &str) -> String {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn map_reqx_error(message: &str, err: reqx::Error) -> crate::error::Error {
     match err {
         reqx::Error::HttpStatus {
@@ -728,7 +715,7 @@ pub(crate) fn map_reqx_error(message: &str, err: reqx::Error) -> crate::error::E
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn redacted_url_for_error(url: &Url) -> String {
     let mut out = String::new();
     out.push_str(url.scheme());
@@ -754,7 +741,7 @@ pub(crate) fn redacted_url_for_error(url: &Url) -> String {
     out
 }
 
-#[cfg(any(feature = "tracing", feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "tracing", feature = "_async", feature = "_blocking"))]
 pub(crate) fn redacted_path_for_trace(url: &Url) -> &'static str {
     if url.path() == "/" {
         "/"
@@ -764,7 +751,7 @@ pub(crate) fn redacted_path_for_trace(url: &Url) -> &'static str {
 }
 
 #[cfg(all(
-    any(feature = "async", feature = "blocking"),
+    any(feature = "_async", feature = "_blocking"),
     any(feature = "tracing", test)
 ))]
 pub(crate) fn redacted_host_for_trace(_url: &Url) -> &'static str {
@@ -775,7 +762,7 @@ pub(crate) fn redacted_host_for_trace(_url: &Url) -> &'static str {
 mod tests {
     use std::collections::BTreeSet;
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     use http::Method;
 
     use super::*;
@@ -813,7 +800,7 @@ mod tests {
         assert_eq!(backoff_delay(cfg, 10), Duration::from_millis(0));
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn transport_retries_preserve_safety_and_attempt_limits() {
         let retry = RetryConfig {
@@ -852,7 +839,7 @@ mod tests {
         assert_eq!(cfg.max_retry_after, Duration::from_secs(30));
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn retry_config_rejects_ambiguous_delay_window() {
         let err = RetryConfig {
@@ -871,7 +858,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn validate_request_timeout_rejects_zero() {
         let err = validate_request_timeout(Some(Duration::ZERO))
@@ -888,7 +875,7 @@ mod tests {
         assert!(validate_request_timeout(None).is_ok());
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn prepare_user_agent_rejects_blank_or_ambiguous_values() {
         assert!(prepare_user_agent(Some(String::new())).is_err());
@@ -906,7 +893,7 @@ mod tests {
         assert!(seen.len() > 1);
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn map_reqx_error_http_status_is_mapped_to_api_error() {
         let mut headers = http::HeaderMap::new();
@@ -942,7 +929,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn map_reqx_error_write_body_preserves_source_and_redacts_context() {
         let err = reqx::Error::WriteBody {
@@ -968,7 +955,7 @@ mod tests {
         assert_eq!(cause.to_string(), "writer failed");
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn map_reqx_error_transport_source_redacts_host_path_and_query() {
         let err = reqx::Error::Transport {
@@ -1053,7 +1040,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn service_retry_delay_honors_retry_after_for_http_and_service_errors() {
         let config = RetryConfig {
@@ -1094,7 +1081,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn response_error_from_status_maps_common_status_matrix() {
         let mut headers = http::HeaderMap::new();
@@ -1154,7 +1141,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn response_error_preserves_http_status_for_non_utf8_bodies() {
         let err = response_error_from_body(
@@ -1168,7 +1155,7 @@ mod tests {
         assert!(service_retry_delay(RetryConfig::default(), 1, 3, &Method::GET, &err).is_some());
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn response_error_from_status_uses_header_request_and_host_ids() {
         let mut headers = http::HeaderMap::new();
@@ -1196,7 +1183,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn redacted_path_for_trace_hides_object_paths() {
         let root = Url::parse("https://example.com/").expect("url");
@@ -1205,14 +1192,14 @@ mod tests {
         assert_eq!(redacted_path_for_trace(&object), "/<redacted>");
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn redacted_host_for_trace_hides_virtual_host_bucket() {
         let url = Url::parse("https://bucket-with-sensitive-name.s3.example.com/key").expect("url");
         assert_eq!(redacted_host_for_trace(&url), "<redacted-host>");
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn response_error_from_status_429_preserves_service_error_fields() {
         let mut headers = http::HeaderMap::new();
@@ -1256,7 +1243,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn response_service_error_detects_embedded_service_error_xml() {
         let mut headers = http::HeaderMap::new();
@@ -1284,7 +1271,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn response_service_error_ignores_non_error_success_body() {
         assert!(
@@ -1297,7 +1284,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn response_service_error_ignores_delete_result_entry_errors() {
         let body = r#"
@@ -1318,7 +1305,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn response_service_error_maps_request_id_only_error_payload() {
         let body = r#"<Error><RequestId>req-only</RequestId></Error>"#;
@@ -1337,7 +1324,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "async", feature = "blocking"))]
+    #[cfg(any(feature = "_async", feature = "_blocking"))]
     #[test]
     fn response_service_error_preserves_retryable_service_code_on_4xx() {
         let body = r#"<Error><Code>SlowDown</Code><Message>slow down</Message></Error>"#;
@@ -1356,7 +1343,7 @@ mod tests {
     }
 
     #[cfg(all(
-        any(feature = "async", feature = "blocking"),
+        any(feature = "_async", feature = "_blocking"),
         feature = "credentials-imds"
     ))]
     #[test]

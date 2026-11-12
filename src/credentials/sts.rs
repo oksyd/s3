@@ -1,11 +1,9 @@
 use super::parse_expiration;
+use crate::TlsConfig;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
-#[cfg(any(feature = "async", feature = "blocking"))]
-use reqx::{
-    advanced::TlsRootStore,
-    prelude::{RedirectPolicy, RetryPolicy, StatusPolicy},
-};
+#[cfg(any(feature = "_async", feature = "_blocking"))]
+use reqx::prelude::{RedirectPolicy, RetryPolicy, StatusPolicy};
 
 use crate::{
     auth::{AddressingStyle, Credentials, CredentialsSnapshot, Region},
@@ -14,40 +12,40 @@ use crate::{
 
 const SERVICE: &str = "sts";
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 pub(crate) async fn assume_role_async(
     region: &Region,
     role_arn: &str,
     role_session_name: &str,
     source_credentials: &Credentials,
-    tls_root_store: TlsRootStore,
+    tls: TlsConfig,
 ) -> Result<CredentialsSnapshot, Error> {
     use std::time::Duration;
 
     let (url, headers, body) =
         assume_role_request(region, role_arn, role_session_name, source_credentials)?;
 
-    let client = sts_async_client(Duration::from_secs(10), tls_root_store)?;
+    let client = sts_async_client(Duration::from_secs(10), tls)?;
     let resp = send_form_async(&client, url.to_string(), headers, body).await?;
     let text = sts_response_text(resp.status(), resp.headers(), resp.body())?;
 
     parse_assume_role_response(text)
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 pub(crate) fn assume_role_blocking(
     region: &Region,
     role_arn: &str,
     role_session_name: &str,
     source_credentials: &Credentials,
-    tls_root_store: TlsRootStore,
+    tls: TlsConfig,
 ) -> Result<CredentialsSnapshot, Error> {
     use std::time::Duration;
 
     let (url, headers, body) =
         assume_role_request(region, role_arn, role_session_name, source_credentials)?;
 
-    let client = sts_blocking_client(Duration::from_secs(10), tls_root_store)?;
+    let client = sts_blocking_client(Duration::from_secs(10), tls)?;
     let resp = send_form_blocking(&client, url.to_string(), headers, body)?;
     let text = sts_response_text(resp.status(), resp.headers(), resp.body())?;
 
@@ -94,30 +92,30 @@ fn assume_role_request(
     Ok((resolved, headers, body_bytes))
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 pub(crate) async fn assume_role_with_web_identity_env_async(
-    tls_root_store: TlsRootStore,
+    tls: TlsConfig,
 ) -> Result<CredentialsSnapshot, Error> {
     use std::time::Duration;
 
     let (url, headers, body) = web_identity_request()?;
 
-    let client = sts_async_client(Duration::from_secs(10), tls_root_store)?;
+    let client = sts_async_client(Duration::from_secs(10), tls)?;
     let resp = send_form_async(&client, url.to_string(), headers, body).await?;
     let text = sts_response_text(resp.status(), resp.headers(), resp.body())?;
 
     parse_assume_role_with_web_identity_response(text)
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 pub(crate) fn assume_role_with_web_identity_env_blocking(
-    tls_root_store: TlsRootStore,
+    tls: TlsConfig,
 ) -> Result<CredentialsSnapshot, Error> {
     use std::time::Duration;
 
     let (url, headers, body) = web_identity_request()?;
 
-    let client = sts_blocking_client(Duration::from_secs(10), tls_root_store)?;
+    let client = sts_blocking_client(Duration::from_secs(10), tls)?;
     let resp = send_form_blocking(&client, url.to_string(), headers, body)?;
     let text = sts_response_text(resp.status(), resp.headers(), resp.body())?;
 
@@ -146,7 +144,7 @@ fn web_identity_request() -> Result<(url::Url, HeaderMap, Bytes), Error> {
     Ok((endpoint, headers, body_bytes))
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 async fn send_form_async(
     client: &reqx::Client,
     url: String,
@@ -165,7 +163,7 @@ async fn send_form_async(
         .map_err(|e| crate::transport::map_reqx_error("request failed", e))
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 fn send_form_blocking(
     client: &reqx::blocking::Client,
     url: String,
@@ -445,28 +443,25 @@ fn parse_assume_role_with_web_identity_response(body: &str) -> Result<Credential
     parsed.result.credentials.into_snapshot()
 }
 
-#[cfg(feature = "async")]
-fn sts_async_client(
-    timeout: std::time::Duration,
-    tls_root_store: TlsRootStore,
-) -> Result<reqx::Client, Error> {
+#[cfg(feature = "_async")]
+fn sts_async_client(timeout: std::time::Duration, tls: TlsConfig) -> Result<reqx::Client, Error> {
     reqx::Client::builder("http://localhost")
         .request_timeout(timeout)
         .retry_policy(RetryPolicy::disabled())
         .redirect_policy(RedirectPolicy::none())
         .default_status_policy(StatusPolicy::Response)
         .max_response_body_bytes(4 * 1024 * 1024)
-        .tls_backend(crate::transport::default_tls_backend())
-        .tls_root_store(tls_root_store)
+        .tls_backend(tls.async_backend()?)
+        .tls_root_store(tls.root_store.into_reqx())
         .client_name("s3-sts")
         .build()
         .map_err(|e| Error::transport("failed to build HTTP client", Some(Box::new(e))))
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 fn sts_blocking_client(
     timeout: std::time::Duration,
-    tls_root_store: TlsRootStore,
+    tls: TlsConfig,
 ) -> Result<reqx::blocking::Client, Error> {
     reqx::blocking::Client::builder("http://localhost")
         .request_timeout(timeout)
@@ -474,8 +469,8 @@ fn sts_blocking_client(
         .redirect_policy(RedirectPolicy::none())
         .default_status_policy(StatusPolicy::Response)
         .max_response_body_bytes(4 * 1024 * 1024)
-        .tls_backend(crate::transport::default_tls_backend())
-        .tls_root_store(tls_root_store)
+        .tls_backend(tls.blocking_backend()?)
+        .tls_root_store(tls.root_store.into_reqx())
         .client_name("s3-sts")
         .build()
         .map_err(|e| Error::transport("failed to build HTTP client", Some(Box::new(e))))
@@ -483,6 +478,7 @@ fn sts_blocking_client(
 
 #[cfg(test)]
 mod tests {
+    use crate::TlsRootStore;
     use std::io::{ErrorKind, Read, Write};
     use std::net::{SocketAddr, TcpListener};
     use std::thread::JoinHandle;
@@ -550,10 +546,12 @@ mod tests {
         Ok((addr, handle))
     }
 
-    #[cfg(all(
-        any(feature = "async", feature = "blocking"),
-        feature = "native-tls",
-        not(feature = "rustls")
+    #[cfg(any(
+        all(feature = "async-tls-native", not(feature = "async-tls-rustls-ring")),
+        all(
+            feature = "blocking-tls-native",
+            not(feature = "blocking-tls-rustls-ring")
+        )
     ))]
     fn assert_native_tls_webpki_error(err: Error) {
         match err {
@@ -833,22 +831,22 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     #[test]
     fn sts_async_client_accepts_backend_default() {
-        let client = sts_async_client(Duration::from_secs(1), TlsRootStore::BackendDefault);
+        let client = sts_async_client(Duration::from_secs(1), TlsConfig::default());
         let client = client.expect("async STS client should build");
         assert_eq!(client.default_status_policy(), StatusPolicy::Response);
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     #[tokio::test]
     async fn send_form_async_non_success_returns_status_response() -> std::result::Result<(), Error>
     {
         let (addr, handle) = spawn_test_server(
             b"HTTP/1.1 403 Forbidden\r\nx-amz-request-id: req-1\r\nContent-Length: 13\r\nConnection: close\r\n\r\nAccess Denied!".to_vec(),
         )?;
-        let client = sts_async_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
+        let client = sts_async_client(Duration::from_secs(2), TlsConfig::default())?;
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::CONTENT_TYPE,
@@ -867,13 +865,13 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     #[tokio::test]
     async fn send_form_async_does_not_follow_redirects() -> std::result::Result<(), Error> {
         let (addr, handle) = spawn_test_server(
             b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
         )?;
-        let client = sts_async_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
+        let client = sts_async_client(Duration::from_secs(2), TlsConfig::default())?;
         let resp = send_form_async(
             &client,
             format!("http://{addr}/"),
@@ -888,38 +886,56 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(feature = "async", feature = "rustls"))]
+    #[cfg(any(
+        feature = "async-tls-rustls-ring",
+        all(
+            feature = "async-tls-rustls-graviola",
+            not(feature = "async-tls-native")
+        )
+    ))]
     #[test]
     fn sts_async_client_accepts_webpki_on_rustls() {
-        let client = sts_async_client(Duration::from_secs(1), TlsRootStore::WebPki);
+        let client = sts_async_client(
+            Duration::from_secs(1),
+            TlsConfig {
+                root_store: TlsRootStore::WebPki,
+                ..TlsConfig::default()
+            },
+        );
         assert!(client.is_ok(), "rustls should accept WebPki root store");
     }
 
-    #[cfg(all(feature = "async", feature = "native-tls", not(feature = "rustls")))]
+    #[cfg(all(feature = "async-tls-native", not(feature = "async-tls-rustls-ring")))]
     #[test]
     fn sts_async_client_rejects_webpki_on_native_tls() {
-        let err = match sts_async_client(Duration::from_secs(1), TlsRootStore::WebPki) {
+        let err = match sts_async_client(
+            Duration::from_secs(1),
+            TlsConfig {
+                root_store: TlsRootStore::WebPki,
+                ..TlsConfig::default()
+            },
+        ) {
             Ok(_) => panic!("native-tls should reject WebPki root store"),
             Err(err) => err,
         };
         assert_native_tls_webpki_error(err);
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     #[test]
     fn sts_blocking_client_accepts_backend_default() {
-        let client = sts_blocking_client(Duration::from_secs(1), TlsRootStore::BackendDefault);
+        let client = sts_blocking_client(Duration::from_secs(1), TlsConfig::default());
         let client = client.expect("blocking STS client should build");
         assert_eq!(client.default_status_policy(), StatusPolicy::Response);
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     #[test]
     fn send_form_blocking_non_success_returns_status_response() -> std::result::Result<(), Error> {
         let (addr, handle) = spawn_test_server(
             b"HTTP/1.1 403 Forbidden\r\nx-amz-request-id: req-1\r\nContent-Length: 13\r\nConnection: close\r\n\r\nAccess Denied!".to_vec(),
         )?;
-        let client = sts_blocking_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
+        let client = sts_blocking_client(Duration::from_secs(2), TlsConfig::default())?;
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::CONTENT_TYPE,
@@ -938,13 +954,13 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     #[test]
     fn send_form_blocking_does_not_follow_redirects() -> std::result::Result<(), Error> {
         let (addr, handle) = spawn_test_server(
             b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
         )?;
-        let client = sts_blocking_client(Duration::from_secs(2), TlsRootStore::BackendDefault)?;
+        let client = sts_blocking_client(Duration::from_secs(2), TlsConfig::default())?;
         let resp = send_form_blocking(
             &client,
             format!("http://{addr}/"),
@@ -958,20 +974,74 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(feature = "blocking", feature = "rustls"))]
+    #[cfg(any(
+        feature = "blocking-tls-rustls-ring",
+        all(
+            feature = "blocking-tls-rustls-graviola",
+            not(feature = "blocking-tls-native")
+        )
+    ))]
     #[test]
     fn sts_blocking_client_accepts_webpki_on_rustls() {
-        let client = sts_blocking_client(Duration::from_secs(1), TlsRootStore::WebPki);
+        let client = sts_blocking_client(
+            Duration::from_secs(1),
+            TlsConfig {
+                root_store: TlsRootStore::WebPki,
+                ..TlsConfig::default()
+            },
+        );
         assert!(client.is_ok(), "rustls should accept WebPki root store");
     }
 
-    #[cfg(all(feature = "blocking", feature = "native-tls", not(feature = "rustls")))]
+    #[cfg(all(
+        feature = "blocking-tls-native",
+        not(feature = "blocking-tls-rustls-ring")
+    ))]
     #[test]
     fn sts_blocking_client_rejects_webpki_on_native_tls() {
-        let err = match sts_blocking_client(Duration::from_secs(1), TlsRootStore::WebPki) {
+        let err = match sts_blocking_client(
+            Duration::from_secs(1),
+            TlsConfig {
+                root_store: TlsRootStore::WebPki,
+                ..TlsConfig::default()
+            },
+        ) {
             Ok(_) => panic!("native-tls should reject WebPki root store"),
             Err(err) => err,
         };
         assert_native_tls_webpki_error(err);
+    }
+    #[cfg(feature = "async-tls-rustls-graviola")]
+    #[test]
+    fn sts_async_client_uses_explicit_graviola() {
+        let client = sts_async_client(
+            Duration::from_secs(1),
+            TlsConfig {
+                backend: Some(crate::TlsBackend::RustlsGraviola),
+                ..TlsConfig::default()
+            },
+        )
+        .expect("explicit Graviola backend should build");
+        assert_eq!(
+            client.tls_backend(),
+            reqx::advanced::TlsBackend::RustlsGraviola
+        );
+    }
+
+    #[cfg(feature = "blocking-tls-rustls-graviola")]
+    #[test]
+    fn sts_blocking_client_uses_explicit_graviola() {
+        let client = sts_blocking_client(
+            Duration::from_secs(1),
+            TlsConfig {
+                backend: Some(crate::TlsBackend::RustlsGraviola),
+                ..TlsConfig::default()
+            },
+        )
+        .expect("explicit Graviola backend should build");
+        assert_eq!(
+            client.tls_backend(),
+            reqx::advanced::TlsBackend::RustlsGraviola
+        );
     }
 }

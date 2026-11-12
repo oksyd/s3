@@ -1,10 +1,10 @@
-#[cfg(all(feature = "async", feature = "credentials-sts"))]
+#[cfg(all(feature = "_async", feature = "credentials-sts"))]
 use std::env;
 
-#[cfg(all(feature = "async", feature = "credentials-sts"))]
-use s3::{Auth, Client, TlsRootStore};
+#[cfg(all(feature = "_async", feature = "credentials-sts"))]
+use s3::{Auth, Client, TlsConfig, TlsRootStore};
 
-#[cfg(all(feature = "async", feature = "credentials-sts"))]
+#[cfg(all(feature = "_async", feature = "credentials-sts"))]
 fn tls_root_store_from_env(name: &str) -> TlsRootStore {
     match env::var(name)
         .unwrap_or_default()
@@ -17,7 +17,7 @@ fn tls_root_store_from_env(name: &str) -> TlsRootStore {
     }
 }
 
-#[cfg(all(feature = "async", feature = "credentials-sts"))]
+#[cfg(all(feature = "_async", feature = "credentials-sts"))]
 #[tokio::main]
 async fn main() -> Result<(), s3::Error> {
     let endpoint = match env::var("S3_TEST_ENDPOINT") {
@@ -30,14 +30,18 @@ async fn main() -> Result<(), s3::Error> {
     let region = env::var("S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".to_string());
 
     let credentials_tls_root_store = tls_root_store_from_env("S3_CREDENTIALS_TLS_ROOT_STORE");
-    let auth =
-        match Auth::from_web_identity_env_with_tls_root_store(credentials_tls_root_store).await {
-            Ok(v) => v,
-            Err(err) => {
-                eprintln!("Web identity credentials are not available: {err}");
-                return Ok(());
-            }
-        };
+    let auth = match Auth::from_web_identity_env_with_tls(TlsConfig {
+        root_store: credentials_tls_root_store,
+        ..TlsConfig::default()
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("Web identity credentials are not available: {err}");
+            return Ok(());
+        }
+    };
 
     let request_tls_root_store = tls_root_store_from_env("S3_TLS_ROOT_STORE");
     eprintln!(
@@ -50,7 +54,10 @@ async fn main() -> Result<(), s3::Error> {
     let client = Client::builder(&endpoint)?
         .region(region)
         .auth(auth)
-        .tls_root_store(request_tls_root_store)
+        .tls(TlsConfig {
+            root_store: request_tls_root_store,
+            ..TlsConfig::default()
+        })
         .build()?;
 
     let buckets = client.buckets().list().send().await?;
@@ -61,8 +68,8 @@ async fn main() -> Result<(), s3::Error> {
     Ok(())
 }
 
-#[cfg(not(all(feature = "async", feature = "credentials-sts")))]
+#[cfg(not(all(feature = "_async", feature = "credentials-sts")))]
 fn main() {
-    eprintln!("This example requires `async` + `credentials-sts`.");
+    eprintln!("This example requires an async client/TLS feature and `credentials-sts`.");
     eprintln!("Try: cargo run --example async_auth_web_identity --features credentials-sts");
 }

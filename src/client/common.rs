@@ -3,17 +3,17 @@ use std::time::Duration;
 use time::OffsetDateTime;
 use url::Url;
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use http::{HeaderMap, Method, Uri};
 
 use crate::{
     auth::CredentialsSnapshot,
     error::{Error, Result},
 };
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use crate::{auth::Region, util};
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) fn sign_with_snapshot(
     method: &Method,
     resolved: &Uri,

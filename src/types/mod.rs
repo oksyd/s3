@@ -18,18 +18,18 @@ use http::{HeaderMap, Method, Uri};
 #[cfg(any(
     feature = "checksums",
     feature = "multipart",
-    feature = "async",
-    feature = "blocking"
+    feature = "_async",
+    feature = "_blocking"
 ))]
 use crate::error::Error;
 use crate::error::Result;
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use bytes::Bytes;
 
-#[cfg(any(test, feature = "async", feature = "blocking"))]
+#[cfg(any(test, feature = "_async", feature = "_blocking"))]
 pub(crate) const MAX_DELETE_OBJECTS_PER_REQUEST: usize = 1_000;
 
-#[cfg(any(test, feature = "async", feature = "blocking"))]
+#[cfg(any(test, feature = "_async", feature = "_blocking"))]
 pub(crate) mod xml;
 
 /// Fully resolved presigned request.
@@ -45,7 +45,7 @@ pub struct PresignedRequest {
     pub headers: HeaderMap,
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 /// Output from a GET object request.
 pub struct GetObjectOutput {
     /// Response body reader for Tokio I/O.
@@ -58,7 +58,7 @@ pub struct GetObjectOutput {
     pub content_type: Option<String>,
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 /// Output from a blocking GET object request.
 pub struct BlockingGetObjectOutput {
     /// Response body reader.
@@ -71,7 +71,7 @@ pub struct BlockingGetObjectOutput {
     pub content_type: Option<String>,
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 impl std::fmt::Debug for BlockingGetObjectOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BlockingGetObjectOutput")
@@ -83,7 +83,7 @@ impl std::fmt::Debug for BlockingGetObjectOutput {
     }
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 impl BlockingGetObjectOutput {
     /// Reads the full response body into memory.
     pub fn bytes(mut self) -> Result<Bytes> {
@@ -106,7 +106,7 @@ impl BlockingGetObjectOutput {
     }
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 impl std::fmt::Debug for GetObjectOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GetObjectOutput")
@@ -118,7 +118,7 @@ impl std::fmt::Debug for GetObjectOutput {
     }
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 impl GetObjectOutput {
     /// Reads the full response body into memory.
     pub async fn bytes(mut self) -> Result<Bytes> {

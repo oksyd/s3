@@ -7,19 +7,16 @@ use http::StatusCode;
 use http::Uri;
 use http::header::USER_AGENT;
 use http::{HeaderMap, HeaderValue, Method};
-use reqx::{
-    advanced::TlsRootStore,
-    prelude::{RedirectPolicy, RetryPolicy, StatusPolicy},
-};
+use reqx::prelude::{RedirectPolicy, RetryPolicy, StatusPolicy};
 
 use crate::{
+    TlsConfig,
     error::Result,
     transport::{
         MAX_BUFFERED_RESPONSE_BODY_BYTES, MAX_ERROR_RESPONSE_BODY_BYTES, RequestBody, RequestTimer,
-        RetryConfig, default_tls_backend, ensure_method_accepts_body, map_reqx_error,
-        prepare_user_agent, record_retry, record_service_error, response_error,
-        response_error_if_any, service_retry_delay, transport_retry_delay,
-        validate_request_timeout,
+        RetryConfig, ensure_method_accepts_body, map_reqx_error, prepare_user_agent, record_retry,
+        record_service_error, response_error, response_error_if_any, service_retry_delay,
+        transport_retry_delay, validate_request_timeout,
     },
 };
 
@@ -36,7 +33,7 @@ impl BlockingTransport {
         retry: RetryConfig,
         user_agent: Option<String>,
         timeout: Option<Duration>,
-        tls_root_store: TlsRootStore,
+        tls: TlsConfig,
     ) -> Result<Self> {
         let retry = retry.validate()?;
         validate_request_timeout(timeout)?;
@@ -48,8 +45,8 @@ impl BlockingTransport {
             .redirect_policy(RedirectPolicy::none())
             .default_status_policy(StatusPolicy::Response)
             .max_response_body_bytes(MAX_BUFFERED_RESPONSE_BODY_BYTES)
-            .tls_backend(default_tls_backend())
-            .tls_root_store(tls_root_store);
+            .tls_backend(tls.blocking_backend()?)
+            .tls_root_store(tls.root_store.into_reqx());
 
         #[cfg(feature = "metrics")]
         {
@@ -241,8 +238,70 @@ mod tests {
     use super::*;
     use crate::transport::response_error_from_status;
 
-    mod reqx {
-        pub use ::reqx::advanced::TlsRootStore;
+    use crate::{TlsBackend, TlsRootStore};
+
+    #[cfg(all(
+        feature = "blocking-tls-rustls-graviola",
+        not(any(feature = "blocking-tls-rustls-ring", feature = "blocking-tls-native"))
+    ))]
+    #[test]
+    fn uses_graviola_backend() {
+        let transport = BlockingTransport::new(
+            RetryConfig::default(),
+            None,
+            None,
+            TlsConfig {
+                root_store: TlsRootStore::WebPki,
+                ..TlsConfig::default()
+            },
+        )
+        .expect("Graviola client should build without a global crypto provider");
+        assert_eq!(
+            transport.client.tls_backend(),
+            ::reqx::advanced::TlsBackend::RustlsGraviola
+        );
+    }
+
+    #[test]
+    fn explicit_tls_backend_is_used_or_rejected_without_fallback() {
+        for (backend, expected, feature, enabled) in [
+            (
+                TlsBackend::RustlsRing,
+                ::reqx::advanced::TlsBackend::RustlsRing,
+                "blocking-tls-rustls-ring",
+                cfg!(feature = "blocking-tls-rustls-ring"),
+            ),
+            (
+                TlsBackend::RustlsGraviola,
+                ::reqx::advanced::TlsBackend::RustlsGraviola,
+                "blocking-tls-rustls-graviola",
+                cfg!(feature = "blocking-tls-rustls-graviola"),
+            ),
+            (
+                TlsBackend::NativeTls,
+                ::reqx::advanced::TlsBackend::NativeTls,
+                "blocking-tls-native",
+                cfg!(feature = "blocking-tls-native"),
+            ),
+        ] {
+            let result = BlockingTransport::new(
+                RetryConfig::default(),
+                None,
+                None,
+                TlsConfig {
+                    backend: Some(backend),
+                    ..TlsConfig::default()
+                },
+            );
+            match (result, enabled) {
+                (Ok(transport), true) => assert_eq!(transport.client.tls_backend(), expected),
+                (Err(Error::InvalidConfig { message }), false) => {
+                    assert!(message.contains(feature))
+                }
+                (Ok(_), false) => panic!("unavailable backend {backend:?} must be rejected"),
+                (Err(err), _) => panic!("unexpected error for {backend:?}: {err:?}"),
+            }
+        }
     }
 
     type RequestCaptureServer = (SocketAddr, std::thread::JoinHandle<()>, Arc<Mutex<Vec<u8>>>);
@@ -439,7 +498,7 @@ mod tests {
             },
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::BackendDefault,
+            TlsConfig::default(),
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -541,7 +600,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -566,7 +628,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_millis(100)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from("http://127.0.0.1:1/private/object/key?token=secret")
             .map_err(|_| Error::invalid_config("invalid test URL"))?;
@@ -613,7 +678,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -651,7 +719,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -685,7 +756,7 @@ mod tests {
                 },
                 None,
                 Some(Duration::from_secs(5)),
-                reqx::TlsRootStore::BackendDefault,
+                TlsConfig::default(),
             )?;
             let url = Uri::try_from(&format!("http://{addr}/"))
                 .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -733,7 +804,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -767,7 +841,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -802,7 +879,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -841,7 +921,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -873,7 +956,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -913,7 +999,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -952,7 +1041,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -984,7 +1076,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -1023,7 +1118,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -1058,7 +1156,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -1090,7 +1191,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -1127,7 +1231,10 @@ mod tests {
             retry,
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;
@@ -1154,7 +1261,10 @@ mod tests {
             RetryConfig::default(),
             None,
             Some(Duration::from_secs(5)),
-            reqx::TlsRootStore::System,
+            TlsConfig {
+                root_store: TlsRootStore::System,
+                ..TlsConfig::default()
+            },
         )?;
         let url = Uri::try_from(&format!("http://{addr}/"))
             .map_err(|_| Error::invalid_config("invalid test server URL"))?;

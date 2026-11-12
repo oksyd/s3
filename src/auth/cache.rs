@@ -1,22 +1,22 @@
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 use std::sync::Condvar;
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use std::sync::{Mutex, MutexGuard};
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use std::time::Duration;
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use time::OffsetDateTime;
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use crate::{Error, Result};
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 use super::CredentialsFuture;
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use super::{CredentialsProvider, CredentialsSnapshot};
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 #[derive(Debug)]
 struct CachedState {
     cached: Option<CredentialsSnapshot>,
@@ -24,7 +24,7 @@ struct CachedState {
     last_refresh_attempt: Option<std::time::Instant>,
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 enum RefreshDecision {
     UseCached(CredentialsSnapshot),
     Wait,
@@ -38,26 +38,26 @@ enum RefreshDecision {
 /// - caches the latest usable [`CredentialsSnapshot`]
 /// - refreshes early before expiry
 /// - coalesces concurrent refreshes so only one caller performs the refresh work
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 #[derive(Debug)]
 pub struct CachedProvider<P> {
     pub(super) inner: P,
     refresh_before: Duration,
     min_refresh_interval: Duration,
     state: Mutex<CachedState>,
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     condvar: Condvar,
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     notify: tokio::sync::Notify,
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 struct RefreshGuard<'a, P: CredentialsProvider> {
     provider: &'a CachedProvider<P>,
     active: bool,
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl<P: CredentialsProvider> RefreshGuard<'_, P> {
     fn finish(mut self, refreshed: Result<CredentialsSnapshot>) -> Result<CredentialsSnapshot> {
         let result = {
@@ -71,7 +71,7 @@ impl<P: CredentialsProvider> RefreshGuard<'_, P> {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl<P: CredentialsProvider> Drop for RefreshGuard<'_, P> {
     fn drop(&mut self) {
         if self.active {
@@ -82,7 +82,7 @@ impl<P: CredentialsProvider> Drop for RefreshGuard<'_, P> {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl<P> CachedProvider<P>
 where
     P: CredentialsProvider,
@@ -98,9 +98,9 @@ where
                 refreshing: false,
                 last_refresh_attempt: None,
             }),
-            #[cfg(feature = "blocking")]
+            #[cfg(feature = "_blocking")]
             condvar: Condvar::new(),
-            #[cfg(feature = "async")]
+            #[cfg(feature = "_async")]
             notify: tokio::sync::Notify::new(),
         }
     }
@@ -127,13 +127,13 @@ where
     }
 
     /// Forces a refresh in async mode.
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     pub async fn force_refresh_async(&self) -> Result<CredentialsSnapshot> {
         self.get_async(true).await
     }
 
     /// Forces a refresh in blocking mode.
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     pub fn force_refresh_blocking(&self) -> Result<CredentialsSnapshot> {
         self.get_blocking(true)
     }
@@ -254,10 +254,10 @@ where
     }
 
     fn notify_refresh_waiters(&self) {
-        #[cfg(feature = "async")]
+        #[cfg(feature = "_async")]
         self.notify.notify_waiters();
 
-        #[cfg(feature = "blocking")]
+        #[cfg(feature = "_blocking")]
         self.condvar.notify_all();
     }
 
@@ -267,7 +267,7 @@ where
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     fn wait_for_blocking_refresh(&self) {
         let mut state = self.lock_state();
         while state.refreshing {
@@ -278,7 +278,7 @@ where
         }
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     fn get_blocking(&self, force: bool) -> Result<CredentialsSnapshot> {
         use std::time::Instant;
 
@@ -308,7 +308,7 @@ where
         }
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     async fn get_async(&self, force: bool) -> Result<CredentialsSnapshot> {
         use std::time::Instant;
 
@@ -337,17 +337,17 @@ where
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl<P> CredentialsProvider for CachedProvider<P>
 where
     P: CredentialsProvider,
 {
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     fn credentials_async(&self) -> CredentialsFuture<'_> {
         Box::pin(async move { self.get_async(false).await })
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     fn credentials_blocking(&self) -> Result<CredentialsSnapshot> {
         self.get_blocking(false)
     }

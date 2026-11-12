@@ -1,13 +1,13 @@
-#[cfg(any(feature = "async", feature = "blocking", feature = "checksums"))]
+#[cfg(any(feature = "_async", feature = "_blocking", feature = "checksums"))]
 use std::{hint::black_box, time::Duration};
 
-#[cfg(any(feature = "async", feature = "blocking", feature = "checksums"))]
+#[cfg(any(feature = "_async", feature = "_blocking", feature = "checksums"))]
 use criterion::BenchmarkId;
 #[cfg(feature = "checksums")]
 use criterion::Throughput;
 use criterion::{Criterion, criterion_group, criterion_main};
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 fn async_client(addressing: s3::AddressingStyle) -> s3::Client {
     let creds = s3::Credentials::new("AKIDEXAMPLE", "SECRETKEYEXAMPLE")
         .expect("static credentials must be valid");
@@ -21,7 +21,7 @@ fn async_client(addressing: s3::AddressingStyle) -> s3::Client {
         .expect("client must build")
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 fn blocking_client(addressing: s3::AddressingStyle) -> s3::BlockingClient {
     let creds = s3::Credentials::new("AKIDEXAMPLE", "SECRETKEYEXAMPLE")
         .expect("static credentials must be valid");
@@ -35,7 +35,7 @@ fn blocking_client(addressing: s3::AddressingStyle) -> s3::BlockingClient {
         .expect("client must build")
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 fn bench_presign_async(c: &mut Criterion) {
     let client_path = async_client(s3::AddressingStyle::Path);
     let client_virtual = async_client(s3::AddressingStyle::VirtualHosted);
@@ -83,12 +83,12 @@ fn bench_presign_async(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(not(feature = "async"))]
+#[cfg(not(feature = "_async"))]
 fn bench_presign_async(c: &mut Criterion) {
     let _ = c;
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 fn bench_presign_blocking(c: &mut Criterion) {
     let client_path = blocking_client(s3::AddressingStyle::Path);
     let client_virtual = blocking_client(s3::AddressingStyle::VirtualHosted);
@@ -136,7 +136,7 @@ fn bench_presign_blocking(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(not(feature = "blocking"))]
+#[cfg(not(feature = "_blocking"))]
 fn bench_presign_blocking(c: &mut Criterion) {
     let _ = c;
 }

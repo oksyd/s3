@@ -23,17 +23,17 @@
 //! [`ListObjectsV2Request`](crate::api::ListObjectsV2Request), and
 //! [`PutBucketLifecycleRequest`](crate::api::PutBucketLifecycleRequest).
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 mod blocking_buckets;
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 mod blocking_objects;
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 mod buckets;
 mod common;
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 mod objects;
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 pub use buckets::{
     BucketsService, CreateBucketRequest, DeleteBucketConfigRawRequest, DeleteBucketCorsRequest,
     DeleteBucketEncryptionRequest, DeleteBucketLifecycleRequest,
@@ -45,20 +45,20 @@ pub use buckets::{
     PutBucketPublicAccessBlockRequest, PutBucketTaggingRequest, PutBucketVersioningRequest,
 };
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 pub use objects::{
     CopyObjectRequest, DeleteObjectRequest, DeleteObjectsRequest, GetObjectRequest,
     HeadObjectRequest, ListObjectsV2Pager, ListObjectsV2Request, ObjectsService,
     PresignObjectRequest, PutObjectRequest,
 };
 
-#[cfg(all(feature = "async", feature = "multipart"))]
+#[cfg(all(feature = "_async", feature = "multipart"))]
 pub use objects::{
     AbortMultipartUploadRequest, CompleteMultipartUploadRequest, CreateMultipartUploadRequest,
     ListMultipartUploadsRequest, ListPartsRequest, UploadPartCopyRequest, UploadPartRequest,
 };
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 pub use blocking_buckets::{
     BlockingBucketsService, BlockingCreateBucketRequest, BlockingDeleteBucketConfigRawRequest,
     BlockingDeleteBucketCorsRequest, BlockingDeleteBucketEncryptionRequest,
@@ -74,7 +74,7 @@ pub use blocking_buckets::{
     BlockingPutBucketVersioningRequest,
 };
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 pub use blocking_objects::{
     BlockingCopyObjectRequest, BlockingDeleteObjectRequest, BlockingDeleteObjectsRequest,
     BlockingGetObjectRequest, BlockingHeadObjectRequest, BlockingListObjectsV2Pager,
@@ -82,7 +82,7 @@ pub use blocking_objects::{
     BlockingPutObjectRequest,
 };
 
-#[cfg(all(feature = "blocking", feature = "multipart"))]
+#[cfg(all(feature = "_blocking", feature = "multipart"))]
 pub use blocking_objects::{
     BlockingAbortMultipartUploadRequest, BlockingCompleteMultipartUploadRequest,
     BlockingCreateMultipartUploadRequest, BlockingListMultipartUploadsRequest,

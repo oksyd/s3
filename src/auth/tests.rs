@@ -1,16 +1,16 @@
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use crate::Error;
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 use crate::Result;
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 use std::sync::Condvar;
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use std::sync::Mutex;
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use std::sync::atomic::AtomicUsize;
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use std::sync::atomic::Ordering;
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 use std::time::Duration;
 
 use super::*;
@@ -57,15 +57,15 @@ fn credentials_validate_and_redact_in_debug() {
     assert!(dbg.contains("<redacted>"));
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 #[derive(Debug)]
 struct CountingFailProvider {
     calls: std::sync::Arc<AtomicUsize>,
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl CredentialsProvider for CountingFailProvider {
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     fn credentials_async(&self) -> CredentialsFuture<'_> {
         let calls = self.calls.clone();
         Box::pin(async move {
@@ -74,22 +74,22 @@ impl CredentialsProvider for CountingFailProvider {
         })
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     fn credentials_blocking(&self) -> Result<CredentialsSnapshot> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(Error::invalid_config("refresh failed"))
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 #[derive(Debug)]
 struct DelayedFailProvider {
     delay: Duration,
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl CredentialsProvider for DelayedFailProvider {
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     fn credentials_async(&self) -> CredentialsFuture<'_> {
         let delay = self.delay;
         Box::pin(async move {
@@ -98,21 +98,21 @@ impl CredentialsProvider for DelayedFailProvider {
         })
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     fn credentials_blocking(&self) -> Result<CredentialsSnapshot> {
         std::thread::sleep(self.delay);
         Err(Error::transport("refresh failed", None))
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 #[derive(Debug)]
 struct CountingOkProvider {
     calls: std::sync::Arc<AtomicUsize>,
     expires_in: time::Duration,
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl CountingOkProvider {
     fn new(calls: std::sync::Arc<AtomicUsize>) -> Self {
         Self {
@@ -122,9 +122,9 @@ impl CountingOkProvider {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl CredentialsProvider for CountingOkProvider {
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     fn credentials_async(&self) -> CredentialsFuture<'_> {
         let calls = self.calls.clone();
         let expires_in = self.expires_in;
@@ -136,7 +136,7 @@ impl CredentialsProvider for CountingOkProvider {
         })
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     fn credentials_blocking(&self) -> Result<CredentialsSnapshot> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         let creds = Credentials::new(format!("AKIA_{n}"), "SECRET_TEST").unwrap();
@@ -145,15 +145,15 @@ impl CredentialsProvider for CountingOkProvider {
     }
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 #[derive(Debug)]
 struct ExpiredOkProvider {
     calls: std::sync::Arc<AtomicUsize>,
 }
 
-#[cfg(any(feature = "async", feature = "blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 impl CredentialsProvider for ExpiredOkProvider {
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     fn credentials_async(&self) -> CredentialsFuture<'_> {
         let calls = self.calls.clone();
         Box::pin(async move {
@@ -164,7 +164,7 @@ impl CredentialsProvider for ExpiredOkProvider {
         })
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     fn credentials_blocking(&self) -> Result<CredentialsSnapshot> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let creds = Credentials::new("AKIA_EXPIRED", "SECRET_TEST").unwrap();
@@ -173,7 +173,7 @@ impl CredentialsProvider for ExpiredOkProvider {
     }
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 #[tokio::test]
 async fn cached_provider_returns_stale_on_refresh_error_async() {
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -197,7 +197,7 @@ async fn cached_provider_returns_stale_on_refresh_error_async() {
     assert_eq!(snapshot.expires_at(), initial.expires_at());
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 #[tokio::test]
 async fn cached_provider_singleflight_refresh_async() {
     use tokio::sync::oneshot;
@@ -226,7 +226,7 @@ async fn cached_provider_singleflight_refresh_async() {
             })
         }
 
-        #[cfg(feature = "blocking")]
+        #[cfg(feature = "_blocking")]
         fn credentials_blocking(&self) -> Result<CredentialsSnapshot> {
             Err(Error::invalid_config(
                 "blocking credentials not supported in async test",
@@ -271,7 +271,7 @@ async fn cached_provider_singleflight_refresh_async() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 #[tokio::test]
 async fn cached_provider_recovers_and_wakes_waiters_after_cancelled_refresh() {
     #[derive(Debug)]
@@ -289,7 +289,7 @@ async fn cached_provider_recovers_and_wakes_waiters_after_cancelled_refresh() {
             })
         }
 
-        #[cfg(feature = "blocking")]
+        #[cfg(feature = "_blocking")]
         fn credentials_blocking(&self) -> Result<CredentialsSnapshot> {
             Err(Error::invalid_config("async test provider"))
         }
@@ -320,14 +320,14 @@ async fn cached_provider_recovers_and_wakes_waiters_after_cancelled_refresh() {
     assert_eq!(cached.inner.0.load(Ordering::SeqCst), 2);
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 #[test]
 fn cached_provider_recovers_after_provider_panics() {
     #[derive(Debug)]
     struct PanicFirstProvider(AtomicUsize);
 
     impl CredentialsProvider for PanicFirstProvider {
-        #[cfg(feature = "async")]
+        #[cfg(feature = "_async")]
         fn credentials_async(&self) -> CredentialsFuture<'_> {
             Box::pin(async { self.credentials_blocking() })
         }
@@ -357,7 +357,7 @@ fn cached_provider_recovers_after_provider_panics() {
     assert_eq!(cached.inner.0.load(Ordering::SeqCst), 2);
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 #[tokio::test]
 async fn cached_provider_refresh_before_and_throttle_async() {
     let now = time::OffsetDateTime::now_utc();
@@ -392,7 +392,7 @@ async fn cached_provider_refresh_before_and_throttle_async() {
     assert_eq!(second.credentials().access_key_id(), "STALE");
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 #[tokio::test]
 async fn cached_provider_huge_refresh_before_does_not_overflow_async() {
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -410,7 +410,7 @@ async fn cached_provider_huge_refresh_before_does_not_overflow_async() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 #[tokio::test]
 async fn cached_provider_force_refresh_bypasses_throttle_async() {
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -427,7 +427,7 @@ async fn cached_provider_force_refresh_bypasses_throttle_async() {
     );
 }
 
-#[cfg(all(feature = "async", feature = "blocking"))]
+#[cfg(all(feature = "_async", feature = "_blocking"))]
 #[tokio::test]
 async fn cached_provider_blocking_path_is_safe_inside_tokio_runtime() {
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -439,7 +439,7 @@ async fn cached_provider_blocking_path_is_safe_inside_tokio_runtime() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 #[tokio::test]
 async fn cached_provider_throttles_failed_refresh_without_cache_async() {
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -462,7 +462,7 @@ async fn cached_provider_throttles_failed_refresh_without_cache_async() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 #[tokio::test]
 async fn cached_provider_rejects_expired_refresh_without_cache_async() {
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -481,7 +481,7 @@ async fn cached_provider_rejects_expired_refresh_without_cache_async() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "_async")]
 #[tokio::test]
 async fn cached_provider_does_not_return_expired_stale_after_slow_failed_refresh_async() {
     let initial = CredentialsSnapshot::new(Credentials::new("AKIA_TEST", "SECRET_TEST").unwrap())
@@ -500,7 +500,7 @@ async fn cached_provider_does_not_return_expired_stale_after_slow_failed_refresh
     }
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 #[test]
 fn cached_provider_returns_stale_on_refresh_error_blocking() {
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -524,7 +524,7 @@ fn cached_provider_returns_stale_on_refresh_error_blocking() {
     assert_eq!(snapshot.expires_at(), initial.expires_at());
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 #[test]
 fn cached_provider_singleflight_refresh_blocking() {
     use std::{sync::mpsc, thread};
@@ -537,7 +537,7 @@ fn cached_provider_singleflight_refresh_blocking() {
     }
 
     impl CredentialsProvider for SlowProvider {
-        #[cfg(feature = "async")]
+        #[cfg(feature = "_async")]
         fn credentials_async(&self) -> CredentialsFuture<'_> {
             Box::pin(async {
                 Err(Error::invalid_config(
@@ -609,7 +609,7 @@ fn cached_provider_singleflight_refresh_blocking() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 #[test]
 fn cached_provider_refresh_before_and_throttle_blocking() {
     let now = time::OffsetDateTime::now_utc();
@@ -644,7 +644,7 @@ fn cached_provider_refresh_before_and_throttle_blocking() {
     assert_eq!(second.credentials().access_key_id(), "STALE");
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 #[test]
 fn cached_provider_huge_refresh_before_does_not_overflow_blocking() {
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -662,7 +662,7 @@ fn cached_provider_huge_refresh_before_does_not_overflow_blocking() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 #[test]
 fn cached_provider_force_refresh_bypasses_throttle_blocking() {
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -679,7 +679,7 @@ fn cached_provider_force_refresh_bypasses_throttle_blocking() {
     );
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 #[test]
 fn cached_provider_throttles_failed_refresh_without_cache_blocking() {
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -702,7 +702,7 @@ fn cached_provider_throttles_failed_refresh_without_cache_blocking() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 #[test]
 fn cached_provider_rejects_expired_refresh_without_cache_blocking() {
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -721,7 +721,7 @@ fn cached_provider_rejects_expired_refresh_without_cache_blocking() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
-#[cfg(feature = "blocking")]
+#[cfg(feature = "_blocking")]
 #[test]
 fn cached_provider_does_not_return_expired_stale_after_slow_failed_refresh_blocking() {
     let initial = CredentialsSnapshot::new(Credentials::new("AKIA_TEST", "SECRET_TEST").unwrap())

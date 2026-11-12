@@ -70,7 +70,7 @@ impl Preset {
     }
 
     /// Builds an async client builder from the preset.
-    #[cfg(feature = "async")]
+    #[cfg(feature = "_async")]
     pub fn async_client_builder(&self) -> Result<crate::ClientBuilder> {
         crate::Client::builder(&self.endpoint).map(|b| {
             b.region(self.region.clone())
@@ -79,7 +79,7 @@ impl Preset {
     }
 
     /// Builds a blocking client builder from the preset.
-    #[cfg(feature = "blocking")]
+    #[cfg(feature = "_blocking")]
     pub fn blocking_client_builder(&self) -> Result<crate::BlockingClientBuilder> {
         crate::BlockingClient::builder(&self.endpoint).map(|b| {
             b.region(self.region.clone())
