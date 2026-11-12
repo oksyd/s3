@@ -31,7 +31,7 @@ url = { version = "2.5.8", default-features = false, features = ["std"] }
 
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 crc-fast = { version = "1.10.0", default-features = false, features = ["std"], optional = true }
-graviola = { version = "0.4.1", default-features = false }
+graviola = { version = "0.4.5", default-features = false }
 hex = { version = "0.4.3", default-features = false, features = ["std"] }
 md-5 = { version = "0.11.0", default-features = false }
 sha1 = { version = "0.11.0", default-features = false, optional = true }
@@ -43,8 +43,8 @@ serde_json = { version = "1.0.154", default-features = false, features = ["std"]
 futures-core = { version = "0.3.34", default-features = false, features = ["std"], optional = true }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"], optional = true }
 http-body-util = { version = "0.1.5", default-features = false, optional = true }
-reqx = { version = "0.2.11", default-features = false, optional = true }
-tokio = { version = "1.54.0", default-features = false, features = ["time", "sync", "io-util"], optional = true }
+reqx = { version = "0.2.15", default-features = false, optional = true }
+tokio = { version = "1.54.1", default-features = false, features = ["time", "sync", "io-util"], optional = true }
 
 metrics = { version = "0.24.6", default-features = false, optional = true }
 tracing = { version = "0.1.44", default-features = false, features = ["std"], optional = true }
@@ -53,8 +53,8 @@ tracing = { version = "0.1.44", default-features = false, features = ["std"], op
 criterion = { version = "0.8.2" }
 
 reqwest = { version = "0.13.5", default-features = false, features = ["stream"] }
-tokio = { version = "1.54.0", default-features = false, features = ["macros", "rt-multi-thread", "time", "io-util"] }
-ureq = { version = "3.4.2", default-features = false }
+tokio = { version = "1.54.1", default-features = false, features = ["macros", "rt-multi-thread", "time", "io-util"] }
+ureq = { version = "3.5.2", default-features = false }
 
 [features]
 default = ["async-tls-rustls-ring"]
