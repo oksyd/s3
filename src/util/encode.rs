@@ -29,11 +29,7 @@ fn aws_percent_encode_impl(input: &str, preserve_slash: bool) -> String {
 }
 
 fn hex_upper(nibble: u8) -> char {
-    match nibble {
-        0..=9 => (b'0' + nibble) as char,
-        10..=15 => (b'A' + (nibble - 10)) as char,
-        _ => '0',
-    }
+    b"0123456789ABCDEF"[usize::from(nibble)] as char
 }
 
 pub(crate) fn canonical_query_string(params: &[(String, String)]) -> String {
@@ -42,7 +38,7 @@ pub(crate) fn canonical_query_string(params: &[(String, String)]) -> String {
         .map(|(k, v)| (aws_percent_encode(k), aws_percent_encode(v)))
         .collect::<Vec<_>>();
 
-    items.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    items.sort_unstable();
 
     let mut out = String::new();
     for (idx, (k, v)) in items.into_iter().enumerate() {

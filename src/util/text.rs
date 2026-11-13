@@ -26,15 +26,7 @@ pub(crate) fn decode_single_line_response_body<'a>(
 
 #[cfg(any(test, feature = "credentials-imds", feature = "credentials-sts"))]
 pub(crate) fn strip_trailing_line_ending(value: &str) -> &str {
-    if let Some(value) = value.strip_suffix("\r\n") {
-        value
-    } else if let Some(value) = value.strip_suffix('\n') {
-        value
-    } else if let Some(value) = value.strip_suffix('\r') {
-        value
-    } else {
-        value
-    }
+    value.trim_suffix('\n').trim_suffix('\r')
 }
 
 pub(crate) fn truncate_snippet(body: &str, max_len: usize) -> String {
@@ -70,17 +62,23 @@ mod tests {
 
     #[test]
     fn decodes_single_line_response_body_with_one_optional_line_ending() {
-        assert_eq!(
-            decode_single_line_response_body("token", b"abc\r\n").unwrap(),
-            "abc"
-        );
-        assert_eq!(
-            decode_single_line_response_body("token", b"abc\n").unwrap(),
-            "abc"
-        );
-        assert!(decode_single_line_response_body("token", b"abc\n\n").is_err());
-        assert!(decode_single_line_response_body("token", b"abc\rdef").is_err());
-        assert!(decode_single_line_response_body("token", b"").is_err());
+        for body in ["abc", "abc\r\n", "abc\n", "abc\r"] {
+            assert_eq!(
+                decode_single_line_response_body("token", body.as_bytes()).unwrap(),
+                "abc"
+            );
+        }
+        for body in [
+            "",
+            "\r\n",
+            "abc\n\n",
+            "abc\r\r",
+            "abc\n\r",
+            "abc\r\n\r\n",
+            "abc\rdef",
+        ] {
+            assert!(decode_single_line_response_body("token", body.as_bytes()).is_err());
+        }
     }
 
     #[test]

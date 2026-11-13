@@ -95,7 +95,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! s3 = { version = "0.1", default-features = false, features = ["blocking-tls-rustls-ring"] }
+//! s3 = { version = "0.2", default-features = false, features = ["blocking-tls-rustls-ring"] }
 //! ```
 //!
 //! Each feature enables only its corresponding HTTP client. Combine features to use
@@ -120,8 +120,8 @@
 //! Endpoint presets in [`providers`] are always available.
 //!
 //! Docs.rs builds with all features enabled. Feature-gated items are labeled on
-//! their documentation pages. `_async` and `_blocking` are internal mode switches
-//! enabled by the client/TLS features; do not select them directly.
+//! their documentation pages. `_client`, `_async`, and `_blocking` are internal
+//! features enabled by the client/TLS features; do not select them directly.
 //!
 //! ## Examples
 //!
@@ -169,12 +169,12 @@ pub mod providers;
 pub mod types;
 
 mod auth;
-#[cfg(any(test, feature = "_async", feature = "_blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 mod client;
 mod credentials;
 mod error;
 mod tls;
-#[cfg(any(test, feature = "_async", feature = "_blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 mod transport;
 mod util;
 

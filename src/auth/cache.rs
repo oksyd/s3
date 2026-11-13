@@ -1,3 +1,5 @@
+#[cfg(any(feature = "_async", feature = "_blocking"))]
+use std::mem::DropGuard;
 #[cfg(feature = "_blocking")]
 use std::sync::Condvar;
 #[cfg(any(feature = "_async", feature = "_blocking"))]
@@ -49,37 +51,6 @@ pub struct CachedProvider<P> {
     condvar: Condvar,
     #[cfg(feature = "_async")]
     notify: tokio::sync::Notify,
-}
-
-#[cfg(any(feature = "_async", feature = "_blocking"))]
-struct RefreshGuard<'a, P: CredentialsProvider> {
-    provider: &'a CachedProvider<P>,
-    active: bool,
-}
-
-#[cfg(any(feature = "_async", feature = "_blocking"))]
-impl<P: CredentialsProvider> RefreshGuard<'_, P> {
-    fn finish(mut self, refreshed: Result<CredentialsSnapshot>) -> Result<CredentialsSnapshot> {
-        let result = {
-            let mut state = self.provider.lock_state();
-            let result = CachedProvider::<P>::finish_refresh_state(&mut state, refreshed);
-            self.active = false;
-            result
-        };
-        self.provider.notify_refresh_waiters();
-        result
-    }
-}
-
-#[cfg(any(feature = "_async", feature = "_blocking"))]
-impl<P: CredentialsProvider> Drop for RefreshGuard<'_, P> {
-    fn drop(&mut self) {
-        if self.active {
-            // Cancellation or a provider panic must release the refresh slot.
-            self.provider.lock_state().refreshing = false;
-            self.provider.notify_refresh_waiters();
-        }
-    }
 }
 
 #[cfg(any(feature = "_async", feature = "_blocking"))]
@@ -229,11 +200,19 @@ where
         Ok(RefreshDecision::Refresh)
     }
 
-    fn finish_refresh_state(
-        state: &mut CachedState,
+    fn refresh_guard(&self) -> impl Drop + '_ {
+        DropGuard::new(self, |provider: &Self| {
+            // Release the slot after caching the result, or on cancellation/panic.
+            provider.lock_state().refreshing = false;
+            provider.notify_refresh_waiters();
+        })
+    }
+
+    fn finish_refresh(
+        &self,
         refreshed: Result<CredentialsSnapshot>,
     ) -> Result<CredentialsSnapshot> {
-        state.refreshing = false;
+        let mut state = self.lock_state();
         let now = OffsetDateTime::now_utc();
 
         let refresh_error = match refreshed {
@@ -297,12 +276,9 @@ where
                     continue;
                 }
                 RefreshDecision::Refresh => {
-                    let guard = RefreshGuard {
-                        provider: self,
-                        active: true,
-                    };
+                    let _guard = self.refresh_guard();
                     let refreshed = self.inner.credentials_blocking();
-                    return guard.finish(refreshed);
+                    return self.finish_refresh(refreshed);
                 }
             }
         }
@@ -325,12 +301,9 @@ where
                 RefreshDecision::UseCached(snapshot) => return Ok(snapshot),
                 RefreshDecision::Wait => notified.await,
                 RefreshDecision::Refresh => {
-                    let guard = RefreshGuard {
-                        provider: self,
-                        active: true,
-                    };
+                    let _guard = self.refresh_guard();
                     let refreshed = self.inner.credentials_async().await;
-                    return guard.finish(refreshed);
+                    return self.finish_refresh(refreshed);
                 }
             }
         }

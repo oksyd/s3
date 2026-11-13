@@ -53,8 +53,15 @@ jobs:
             cargo-${{ runner.os }}-
       - run: cargo check --lib --no-default-features
       - run: cargo test --lib --no-default-features
+      - name: Test standalone types and profile credentials
+        run: cargo test --lib --no-default-features --features checksums,multipart,credentials-profile
       - name: Check client dependency isolation
         run: |
+          dependencies=$(cargo tree --no-default-features --edges normal,build --prefix none --format '{p}')
+          if grep -E '^(base64|graviola|hex|httpdate|md-5|quick-xml|reqx|serde|url) ' <<< "$dependencies"; then
+            echo "::error::Client dependencies enabled without a client feature"
+            exit 1
+          fi
           for backend in rustls-ring rustls-graviola native; do
             for mode in async blocking; do
               feature="$mode-tls-$backend"

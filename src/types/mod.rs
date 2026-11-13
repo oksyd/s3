@@ -26,10 +26,10 @@ use crate::error::Result;
 #[cfg(any(feature = "_async", feature = "_blocking"))]
 use bytes::Bytes;
 
-#[cfg(any(test, feature = "_async", feature = "_blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) const MAX_DELETE_OBJECTS_PER_REQUEST: usize = 1_000;
 
-#[cfg(any(test, feature = "_async", feature = "_blocking"))]
+#[cfg(any(feature = "_async", feature = "_blocking"))]
 pub(crate) mod xml;
 
 /// Fully resolved presigned request.
@@ -264,6 +264,7 @@ impl Checksum {
         Self { algorithm, value }
     }
 
+    #[cfg(any(test, feature = "_async", feature = "_blocking"))]
     pub(crate) fn apply(&self, headers: &mut HeaderMap) -> Result<()> {
         let value = http::HeaderValue::from_str(&self.value)
             .map_err(|_| Error::invalid_config("invalid checksum header value"))?;

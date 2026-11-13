@@ -144,8 +144,7 @@ fn parse_ini(contents: &str) -> Result<Profiles, Error> {
             || Error::invalid_config(format!("invalid AWS profile syntax at line {}", index + 1));
         if line.starts_with('[') {
             let name = line
-                .strip_prefix('[')
-                .and_then(|s| s.strip_suffix(']'))
+                .strip_circumfix('[', ']')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(invalid_line)?;
