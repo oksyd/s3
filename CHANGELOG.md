@@ -1,3 +1,8 @@
+## [0.2.1] - 2026-11-12
+
+### ⚙️ Miscellaneous Tasks
+
+- Release s3 version 0.2.1
 ## [0.2.0] - 2026-11-12
 
 ### 🚜 Refactor
